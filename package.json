@@ -9,8 +9,7 @@
     "node": ">=22"
   },
   "exports": {
-    ".": "./dist/index.js",
-    "./contracts": "./dist/contracts.js"
+    ".": "./dist/index.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -37,10 +36,11 @@
     "url": "https://github.com/ArdurAI/ardur-news-aggregator.git"
   },
   "dependencies": {
+    "@ardurai/contracts": "github:ArdurAI/ardur-contracts#dd647215addd7fbbea76e3e4377c9c04f0c9fadd",
     "fast-xml-parser": "^5.8.0"
   },
   "devDependencies": {
-    "typescript": "^5.7.0",
-    "@types/node": "^22.10.0"
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
   }
 }

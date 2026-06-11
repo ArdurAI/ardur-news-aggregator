@@ -8,7 +8,7 @@
 
 import { loadCatalogSources } from './catalog.ts';
 import type { SourceDefinition, TopicDefinition, FetchStrategy } from './source-types.ts';
-import type { TopicMeta } from './contracts.ts';
+import type { TopicMeta } from '@ardurai/contracts';
 
 // Re-export types for backwards compat (ingest.ts, index.ts import from here)
 export type { FetchStrategy, SourceDefinition, TopicDefinition };

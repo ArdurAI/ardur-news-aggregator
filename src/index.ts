@@ -5,8 +5,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { AggregationArtifact, AggregatedItem, CycleMeta, SourceCoverage } from './contracts.ts';
-import { SCHEMA_VERSION, CYCLE_INTERVAL_MS } from './contracts.ts';
+import type { AggregationArtifact, AggregatedItem, CycleMeta, SourceCoverage } from '@ardurai/contracts';
+import { SCHEMA_VERSION, CYCLE_INTERVAL_MS, CONTRACT_REVISION, assertCompatibleArtifact } from '@ardurai/contracts';
 import { loadTopics, sourcesForTopic } from './sources.ts';
 import { ingestTopic } from './ingest.ts';
 import { dedupe } from './dedup.ts';
@@ -14,7 +14,7 @@ import { clusterItems } from './cluster.ts';
 import { captureInteractionMetrics } from './interaction.ts';
 import type { RawItem } from './ingest.ts';
 
-export * from './contracts.ts';
+export * from '@ardurai/contracts';
 export type { SourceDefinition, TopicDefinition, FetchStrategy } from './sources.ts';
 export type { RawItem, IngestResult } from './ingest.ts';
 
@@ -202,8 +202,9 @@ export async function runAggregation(options: AggregationOptions = {}): Promise<
     degraded: false,
   };
 
-  return {
+  const artifact: AggregationArtifact = {
     schemaVersion: SCHEMA_VERSION,
+    contractRevision: CONTRACT_REVISION,
     artifact: 'aggregation',
     runId,
     upstreamRunId: null,
@@ -213,4 +214,11 @@ export async function runAggregation(options: AggregationOptions = {}): Promise<
     warnings,
     data: { itemsByTopic, clustersByTopic, coverageByTopic },
   };
+
+  // Gate before returning: assertCompatibleArtifact verifies envelope integrity.
+  // Any warning produced here (e.g. forward-revision skew in tests) is surfaced.
+  const { warnings: gateWarnings } = assertCompatibleArtifact(artifact, 'aggregation');
+  artifact.warnings.push(...gateWarnings);
+
+  return artifact;
 }

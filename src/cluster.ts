@@ -3,7 +3,7 @@
  * Ported from clusterItems/similarity/tokens in build-news-digests.mjs.
  */
 
-import type { AggregatedItem, Cluster, SourceTier } from './contracts.ts';
+import type { AggregatedItem, Cluster, SourceTier } from '@ardurai/contracts';
 
 const STOPWORDS = new Set([
   'the','a','an','is','are','was','were','be','been','being','have','has','had',

@@ -3,8 +3,8 @@
  * PRIVACY-CRITICAL: aggregate counts only, no per-user data.
  */
 
-import type { InteractionMetrics } from './contracts.ts';
-import { FORBIDDEN_METRIC_KEY_FRAGMENTS } from './contracts.ts';
+import type { InteractionMetrics } from '@ardurai/contracts';
+import { FORBIDDEN_METRIC_KEY_FRAGMENTS } from '@ardurai/contracts';
 
 export { FORBIDDEN_METRIC_KEY_FRAGMENTS };
 

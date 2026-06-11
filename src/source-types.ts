@@ -4,7 +4,7 @@
  * creating a circular dependency with sources.ts.
  */
 
-import type { SourceTier, TopicMeta } from './contracts.ts';
+import type { SourceTier, TopicMeta } from '@ardurai/contracts';
 
 export type FetchStrategy =
   | { kind: 'rss'; feedUrl: string }

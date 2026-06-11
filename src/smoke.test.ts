@@ -1,7 +1,10 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { SCHEMA_VERSION, CYCLE_INTERVAL_MS, FORBIDDEN_METRIC_KEY_FRAGMENTS } from './contracts.ts';
+import {
+  SCHEMA_VERSION, CYCLE_INTERVAL_MS, FORBIDDEN_METRIC_KEY_FRAGMENTS,
+  CONTRACT_REVISION, assertCompatibleArtifact, SchemaVersionError,
+} from '@ardurai/contracts';
 import {
   normalizePublicUrl,
   assertAllowedFetchUrl,
@@ -12,7 +15,7 @@ import { loadSources, loadTopics, sourcesForTopic } from './sources.ts';
 import { fingerprint, dedupe } from './dedup.ts';
 import { clusterItems } from './cluster.ts';
 import { isForbiddenMetricKey, captureInteractionMetrics } from './interaction.ts';
-import type { AggregatedItem } from './contracts.ts';
+import type { AggregatedItem } from '@ardurai/contracts';
 import type { RawItem } from './ingest.ts';
 
 // ---------------------------------------------------------------------------
@@ -33,6 +36,54 @@ describe('contracts', () => {
     assert.ok(FORBIDDEN_METRIC_KEY_FRAGMENTS.includes('session'));
     assert.ok(FORBIDDEN_METRIC_KEY_FRAGMENTS.includes('userid'));
     assert.ok(FORBIDDEN_METRIC_KEY_FRAGMENTS.includes('token'));
+  });
+
+  test('CONTRACT_REVISION is 2 (ratifies claims? as additive field)', () => {
+    assert.equal(CONTRACT_REVISION, 2);
+  });
+
+  test('assertCompatibleArtifact: accepts valid aggregation envelope', () => {
+    const envelope = {
+      schemaVersion: 'ardur-content-pipeline/v1' as const,
+      contractRevision: 2,
+      artifact: 'aggregation' as const,
+      runId: 'test-run',
+      upstreamRunId: null,
+      generatedAt: '2026-06-11T00:00:00.000Z',
+      cycle: { id: '2026-06-11T00:00:00.000Z', windowStart: '2026-06-11T00:00:00.000Z', windowEnd: '2026-06-11T06:00:00.000Z' },
+      topics: [],
+      warnings: [],
+      data: { itemsByTopic: {}, clustersByTopic: {}, coverageByTopic: {} },
+    };
+    const { stage, warnings } = assertCompatibleArtifact(envelope, 'aggregation');
+    assert.equal(stage, 'aggregation');
+    assert.equal(warnings.length, 0);
+  });
+
+  test('assertCompatibleArtifact: throws SchemaVersionError on wrong schemaVersion', () => {
+    assert.throws(
+      () => assertCompatibleArtifact({ schemaVersion: 'wrong/v999', artifact: 'aggregation', data: {} }, 'aggregation'),
+      (e: unknown) => e instanceof SchemaVersionError,
+    );
+  });
+
+  test('assertCompatibleArtifact: throws SchemaVersionError on wrong artifact stage', () => {
+    assert.throws(
+      () => assertCompatibleArtifact({ schemaVersion: 'ardur-content-pipeline/v1', artifact: 'ranking', data: {} }, 'aggregation'),
+      (e: unknown) => e instanceof SchemaVersionError,
+    );
+  });
+
+  test('assertCompatibleArtifact: warns on forward contractRevision (forward-compat)', () => {
+    const envelope = {
+      schemaVersion: 'ardur-content-pipeline/v1' as const,
+      contractRevision: 999,
+      artifact: 'aggregation' as const,
+      data: { itemsByTopic: {}, clustersByTopic: {}, coverageByTopic: {} },
+    };
+    const { warnings } = assertCompatibleArtifact(envelope, 'aggregation');
+    assert.ok(warnings.length > 0);
+    assert.ok(warnings[0]!.includes('999'));
   });
 });
 

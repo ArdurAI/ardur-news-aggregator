@@ -18,7 +18,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { join, dirname } from 'node:path';
-import type { SourceTier } from './contracts.ts';
+import type { SourceTier } from '@ardurai/contracts';
 import type { SourceDefinition, FetchStrategy } from './source-types.ts';
 
 interface CatalogEntry {

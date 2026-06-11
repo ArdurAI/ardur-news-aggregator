@@ -5,7 +5,7 @@
  */
 
 import { XMLParser } from 'fast-xml-parser';
-import type { SourceTier } from './contracts.ts';
+import type { SourceTier } from '@ardurai/contracts';
 import type { SourceDefinition, TopicDefinition } from './source-types.ts';
 import {
   assertAllowedFetchUrl,
