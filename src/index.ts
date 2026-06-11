@@ -21,17 +21,18 @@ import { randomUUID } from 'node:crypto';
 import type {
   AggregationArtifact,
   AggregatedItem,
-  AggregationData,
   CycleMeta,
   SourceCoverage,
+  SourceDocument,
+  ExtractedFact,
 } from '@ardurai/contracts';
 import {
   SCHEMA_VERSION,
   CYCLE_INTERVAL_MS,
+  CONTRACT_REVISION,
   assertCompatibleArtifact,
 } from '@ardurai/contracts';
 import { CONTRACT_REVISION_V3 } from './contracts-v3.ts';
-import type { SourceDocument, ExtractedFact, AggregationDataV3Extension } from './contracts-v3.ts';
 import { loadTopics, sourcesForTopic, loadSources } from './sources.ts';
 import { ingestTopic } from './ingest.ts';
 import { dedupe } from './dedup.ts';
@@ -50,14 +51,6 @@ export type { SourceDefinition, TopicDefinition, FetchStrategy } from './sources
 export type { RawItem, IngestResult } from './ingest.ts';
 export type { SearchProvider, SearchResult } from './search-provider.ts';
 export type { EtlStore } from './etl-store.ts';
-
-// Wire-safe artifact type carrying rev-3 extensions
-type AggregationArtifactV3 = Omit<AggregationArtifact, 'contractRevision' | 'data'> & {
-  contractRevision: typeof CONTRACT_REVISION_V3;
-  data: AggregationData & AggregationDataV3Extension;
-};
-
-export type { AggregationArtifactV3 };
 
 export interface AggregationOptions {
   cycle?: CycleMeta;
@@ -185,14 +178,18 @@ async function runEtlForTopic(
         return;
       }
 
-      const { doc, body } = await fetchArticle(item.url, {
+      const fetched = await fetchArticle(item.url, {
         title: item.title,
         publishedAt: item.publishedAt,
         source: item.source,
         tier: item.tier,
       });
+      const { doc, body } = fetched;
 
-      await fileEtlStore.put(doc, body);
+      const putOpts: import('./etl-store.ts').PutOpts = {};
+      if (fetched.etag !== undefined) putOpts.etag = fetched.etag;
+      if (fetched.lastModified !== undefined) putOpts.lastModified = fetched.lastModified;
+      await fileEtlStore.put(doc, body, putOpts);
       clusterDocs.push(doc);
 
       if (body) {
@@ -440,43 +437,10 @@ export async function runAggregation(options: AggregationOptions = {}): Promise<
     degraded: false,
   };
 
-  // Build artifact — rev 3 when ETL ran, rev 2 otherwise (backward-compatible)
-  const baseData: AggregationData = {
-    itemsByTopic,
-    clustersByTopic,
-    coverageByTopic,
-  };
-
-  if (etlEnabled) {
-    const v3Data: AggregationData & AggregationDataV3Extension = {
-      ...baseData,
-      documentsByTopic,
-      factsByCluster: factsByClusterGlobal,
-    };
-
-    const artifact: AggregationArtifactV3 = {
-      schemaVersion: SCHEMA_VERSION,
-      contractRevision: CONTRACT_REVISION_V3,
-      artifact: 'aggregation',
-      runId,
-      upstreamRunId: null,
-      generatedAt: now.toISOString(),
-      cycle,
-      topics: allTopics.map(({ id, label, description }) => ({ id, label, description })),
-      warnings,
-      data: v3Data,
-    };
-
-    // Gate passes because rev-3 > local rev-2 produces a forward-compat warning (not an error)
-    const { warnings: gateWarnings } = assertCompatibleArtifact(artifact, 'aggregation');
-    artifact.warnings.push(...gateWarnings);
-
-    return artifact as unknown as AggregationArtifact;
-  }
-
+  // Build artifact — rev 3 (AggregationData already carries the optional ETL fields)
   const artifact: AggregationArtifact = {
     schemaVersion: SCHEMA_VERSION,
-    contractRevision: 2,
+    contractRevision: etlEnabled ? CONTRACT_REVISION_V3 : CONTRACT_REVISION,
     artifact: 'aggregation',
     runId,
     upstreamRunId: null,
@@ -484,7 +448,17 @@ export async function runAggregation(options: AggregationOptions = {}): Promise<
     cycle,
     topics: allTopics.map(({ id, label, description }) => ({ id, label, description })),
     warnings,
-    data: baseData,
+    data: {
+      itemsByTopic,
+      clustersByTopic,
+      coverageByTopic,
+      ...(etlEnabled
+        ? {
+            documentsByTopic,
+            factsByCluster: factsByClusterGlobal,
+          }
+        : {}),
+    },
   };
 
   const { warnings: gateWarnings } = assertCompatibleArtifact(artifact, 'aggregation');

@@ -3,12 +3,12 @@
  * private article bodies.
  *
  * Layout under data/etl-store/ (gitignored, never on the wire):
- *   docs/{docId}.json     — SourceDocument metadata (no body)
+ *   docs/{docId}.json     — StoredDoc wrapper (SourceDocument + HTTP cache headers)
  *   bodies/{docId}.txt    — Private extracted body text
  *   hash-index.ndjson     — running contentHash → docId index (append-only)
  *
  * Callers MUST use getBody() to read a body; it is never included in the
- * serialized SourceDocument.
+ * serialized SourceDocument or any wire artifact.
  */
 
 import { createHash } from 'node:crypto';
@@ -22,7 +22,7 @@ import {
 } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { SourceDocument } from './contracts-v3.ts';
+import type { SourceDocument } from '@ardurai/contracts';
 
 const STORE_ROOT = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -51,11 +51,25 @@ export function contentHashOf(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
+/** Internal wrapper stored on disk — extends SourceDocument with HTTP cache hints. */
+interface StoredDoc {
+  doc: SourceDocument;
+  /** HTTP ETag from the server — used for conditional re-fetches. Not on the wire. */
+  etag?: string;
+  /** HTTP Last-Modified from the server. Not on the wire. */
+  lastModified?: string;
+}
+
+export interface PutOpts {
+  etag?: string;
+  lastModified?: string;
+}
+
 export interface EtlStore {
   getByContentHash(hash: string): Promise<SourceDocument | null>;
   getById(id: string): Promise<SourceDocument | null>;
   getBody(sourceDocId: string): Promise<string | null>;
-  put(doc: SourceDocument, body: string | null): Promise<void>;
+  put(doc: SourceDocument, body: string | null, opts?: PutOpts): Promise<void>;
   /** Returns true if we have a fresh (non-expired) version of this URL. */
   hasFresh(
     url: string,
@@ -88,6 +102,16 @@ function appendHashIndex(hash: string, id: string): void {
   hashIndexCache.set(hash, id);
 }
 
+function readStoredDoc(id: string): StoredDoc | null {
+  const path = join(DOCS_DIR, `${id}.json`);
+  if (!existsSync(path)) return null;
+  try {
+    return JSON.parse(readFileSync(path, 'utf8')) as StoredDoc;
+  } catch {
+    return null;
+  }
+}
+
 export const fileEtlStore: EtlStore = {
   async getByContentHash(hash: string): Promise<SourceDocument | null> {
     loadHashIndex();
@@ -97,13 +121,8 @@ export const fileEtlStore: EtlStore = {
   },
 
   async getById(id: string): Promise<SourceDocument | null> {
-    const path = join(DOCS_DIR, `${id}.json`);
-    if (!existsSync(path)) return null;
-    try {
-      return JSON.parse(readFileSync(path, 'utf8')) as SourceDocument;
-    } catch {
-      return null;
-    }
+    const stored = readStoredDoc(id);
+    return stored?.doc ?? null;
   },
 
   async getBody(sourceDocId: string): Promise<string | null> {
@@ -112,16 +131,20 @@ export const fileEtlStore: EtlStore = {
     return readFileSync(path, 'utf8');
   },
 
-  async put(doc: SourceDocument, body: string | null): Promise<void> {
+  async put(doc: SourceDocument, body: string | null, opts: PutOpts = {}): Promise<void> {
     ensureDirs();
     loadHashIndex();
-    // Write doc metadata (no body field)
-    writeFileSync(join(DOCS_DIR, `${doc.id}.json`), JSON.stringify(doc, null, 2), 'utf8');
-    // Write body privately
+
+    const stored: StoredDoc = { doc };
+    if (opts.etag !== undefined) stored.etag = opts.etag;
+    if (opts.lastModified !== undefined) stored.lastModified = opts.lastModified;
+
+    writeFileSync(join(DOCS_DIR, `${doc.id}.json`), JSON.stringify(stored, null, 2), 'utf8');
+
     if (body !== null) {
       writeFileSync(join(BODIES_DIR, `${doc.id}.txt`), body, 'utf8');
     }
-    // Update hash index
+
     if (!hashIndexCache.has(doc.contentHash)) {
       appendHashIndex(doc.contentHash, doc.id);
     }
@@ -132,15 +155,18 @@ export const fileEtlStore: EtlStore = {
     opts: { etag?: string; lastModified?: string; maxAgeMs?: number } = {},
   ): Promise<boolean> {
     const id = docIdFromUrl(url);
-    const doc = await this.getById(id);
-    if (!doc) return false;
-    // If the server provided an ETag and it matches, we're fresh
-    if (opts.etag && doc.etag && opts.etag === doc.etag) return true;
-    // If maxAgeMs provided, check age
+    const stored = readStoredDoc(id);
+    if (!stored) return false;
+
+    // ETag match → definitely fresh
+    if (opts.etag && stored.etag && opts.etag === stored.etag) return true;
+
+    // Age check
     if (opts.maxAgeMs !== undefined) {
-      const age = Date.now() - new Date(doc.fetchedAt).valueOf();
+      const age = Date.now() - new Date(stored.doc.fetchedAt).valueOf();
       return age < opts.maxAgeMs;
     }
+
     return true;
   },
 };

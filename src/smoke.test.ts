@@ -49,14 +49,14 @@ describe('contracts', () => {
     assert.ok(FORBIDDEN_METRIC_KEY_FRAGMENTS.includes('token'));
   });
 
-  test('CONTRACT_REVISION is 2 (ratifies claims? as additive field)', () => {
-    assert.equal(CONTRACT_REVISION, 2);
+  test('CONTRACT_REVISION is 3 (rev 3: ExtractedFact, SourceDocument, visual blocks)', () => {
+    assert.equal(CONTRACT_REVISION, 3);
   });
 
-  test('assertCompatibleArtifact: accepts valid aggregation envelope', () => {
+  test('assertCompatibleArtifact: accepts valid aggregation envelope (rev 3)', () => {
     const envelope = {
       schemaVersion: 'ardur-content-pipeline/v1' as const,
-      contractRevision: 2,
+      contractRevision: 3,
       artifact: 'aggregation' as const,
       runId: 'test-run',
       upstreamRunId: null,
@@ -93,6 +93,7 @@ describe('contracts', () => {
       data: { itemsByTopic: {}, clustersByTopic: {}, coverageByTopic: {} },
     };
     const { warnings } = assertCompatibleArtifact(envelope, 'aggregation');
+    // Forward-compat: should warn on contractRevision > 3
     assert.ok(warnings.length > 0);
     assert.ok(warnings[0]!.includes('999'));
   });
@@ -498,12 +499,12 @@ describe('index (offline)', () => {
 // ---------------------------------------------------------------------------
 
 describe('A1: uncapped ingestion', () => {
-  test('CONTRACT_REVISION_V3 is 3', () => {
+  test('CONTRACT_REVISION_V3 is 3 (re-exported from @ardurai/contracts)', () => {
     assert.equal(CONTRACT_REVISION_V3, 3);
   });
 
-  test('rev-2 CONTRACT_REVISION is still 2 (baseline unchanged)', () => {
-    assert.equal(CONTRACT_REVISION, 2);
+  test('CONTRACT_REVISION from @ardurai/contracts is now 3', () => {
+    assert.equal(CONTRACT_REVISION, 3);
   });
 
   test('index re-exports CONTRACT_REVISION_V3', async () => {

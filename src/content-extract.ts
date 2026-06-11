@@ -11,12 +11,10 @@
  *   - Paywalled/robots-disallowed sources receive snippet-only extraction + flagged status.
  */
 
-import { createHash } from 'node:crypto';
 import { assertAllowedFetchUrl, readBoundedText, DEFAULT_FETCH_PORTS } from './source-safety.ts';
 import { checkRobots } from './robots.ts';
 import { docIdFromUrl, contentHashOf } from './etl-store.ts';
-import type { SourceDocument, ExtractionStatus, AccessPolicy } from './contracts-v3.ts';
-import type { SourceTier } from '@ardurai/contracts';
+import type { SourceDocument, SourceTier, ExtractionStatus, AccessPolicy } from '@ardurai/contracts';
 
 const ARTICLE_USER_AGENT = 'ArdurContentBot/1.0 (+https://ardur.ai/bot)';
 const ARTICLE_MAX_BYTES = 3_000_000; // 3 MB — generous but bounded
@@ -137,6 +135,10 @@ export interface FetchedArticle {
   doc: SourceDocument;
   /** Extracted body text — PRIVATE; store in EtlStore, never emit on wire. */
   body: string | null;
+  /** HTTP ETag from the response — pass to EtlStore.put() opts for conditional re-fetch. Not on wire. */
+  etag?: string;
+  /** HTTP Last-Modified from the response. Not on wire. */
+  lastModified?: string;
 }
 
 export interface ArticleFetchOpts {
@@ -242,10 +244,11 @@ export async function fetchArticle(
         wordCount: snippet.split(/\s+/).length,
         lang,
         contentHash,
-        ...(etag !== undefined ? { etag } : {}),
-        ...(lastModified !== undefined ? { lastModified } : {}),
       };
-      return { doc, body: snippet };
+      const result: FetchedArticle = { doc, body: snippet };
+      if (etag !== undefined) result.etag = etag;
+      if (lastModified !== undefined) result.lastModified = lastModified;
+      return result;
     }
 
     const bodyText = extractText(html);
@@ -268,11 +271,12 @@ export async function fetchArticle(
       wordCount,
       lang,
       contentHash,
-      ...(etag !== undefined ? { etag } : {}),
-      ...(lastModified !== undefined ? { lastModified } : {}),
     };
 
-    return { doc, body };
+    const result: FetchedArticle = { doc, body };
+    if (etag !== undefined) result.etag = etag;
+    if (lastModified !== undefined) result.lastModified = lastModified;
+    return result;
   } finally {
     release();
   }

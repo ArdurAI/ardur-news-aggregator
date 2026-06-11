@@ -11,7 +11,7 @@
 
 import { writeFileSync } from 'node:fs';
 import { runAggregation } from './index.ts';
-import type { AggregationArtifactV3 } from './index.ts';
+import type { SourceDocument, ExtractedFact } from '@ardurai/contracts';
 
 function parseArgs(): {
   outPath: string | null;
@@ -78,13 +78,10 @@ async function main(): Promise<void> {
   process.stderr.write(`  [all] ${allItems.length} merged items · ${artifact.warnings.length} warnings\n`);
 
   if (etlEnabled) {
-    const v3 = artifact as unknown as AggregationArtifactV3;
-    const docCount = Object.values(v3.data.documentsByTopic ?? {}).reduce(
-      (s, docs) => s + docs.length, 0,
-    );
-    const factCount = Object.values(v3.data.factsByCluster ?? {}).reduce(
-      (s, facts) => s + facts.length, 0,
-    );
+    const docs = artifact.data.documentsByTopic as Record<string, SourceDocument[]> | undefined;
+    const facts = artifact.data.factsByCluster as Record<string, ExtractedFact[]> | undefined;
+    const docCount = Object.values(docs ?? {}).reduce((s, d) => s + d.length, 0);
+    const factCount = Object.values(facts ?? {}).reduce((s, f) => s + f.length, 0);
     process.stderr.write(`  ETL: ${docCount} source docs stored · ${factCount} facts extracted\n`);
   }
 
