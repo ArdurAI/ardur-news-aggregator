@@ -9,18 +9,28 @@
     "node": ">=22"
   },
   "exports": {
-    ".": "./dist/index.js"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "ardur-news-aggregator": "./dist/runners.js"
+  },
   "files": [
     "dist",
-    "src"
+    "src",
+    "data"
   ],
   "scripts": {
+    "prepare": "npm run build",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test --experimental-strip-types src/smoke.test.ts",
+    "test:package": "node scripts/verify-package-install.mjs",
     "run": "node --experimental-strip-types src/runners.ts",
     "aggregate": "node --experimental-strip-types src/cli.ts",
     "produce-golden": "node --experimental-strip-types src/cli.ts --out data/golden-sample.json --max-age-hours 168 --timeout 12000 --concurrency 12"

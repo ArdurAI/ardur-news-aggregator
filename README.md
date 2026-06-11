@@ -5,11 +5,11 @@
 > capture. Produces an `AggregationArtifact` consumed by
 > [`ardur-ranking-engine`](https://github.com/ArdurAI/ardur-ranking-engine).
 
-This repository is a **design specification + minimal scaffold**. Interfaces and
-wiring are final; engine logic is intentionally unimplemented (every module
-throws `not implemented`). See [`docs/spec.md`](./docs/spec.md) for the full
-design and [`ARCHITECTURE.md`](./ARCHITECTURE.md) for how the four engines wire
-together.
+This repository is the implemented Stage 1 aggregation package. It exposes
+`runAggregation()` for programmatic use and the `ardur-news-aggregator` runner
+for artifact-oriented pipeline orchestration. See [`docs/spec.md`](./docs/spec.md)
+for the full design and [`ARCHITECTURE.md`](./ARCHITECTURE.md) for how the four
+engines wire together.
 
 ## What it does
 
@@ -37,8 +37,9 @@ flowchart LR
 
 ## Output contract
 
-`runAggregation()` returns an `AggregationArtifact` — a versioned envelope (see
-[`src/contracts.ts`](./src/contracts.ts)) with, per topic:
+`runAggregation()` returns an `AggregationArtifact` — a versioned envelope from
+[`@ardurai/contracts`](https://github.com/ArdurAI/ardur-contracts) with, per
+topic:
 
 - `itemsByTopic` — normalized `AggregatedItem[]` (title, source, tier, canonical
   URL, metadata-derived `summaryHint`, interaction metrics, `clusterId`).
@@ -51,7 +52,8 @@ flowchart LR
 
 | Path | Role |
 |------|------|
-| `src/contracts.ts` | Shared pipeline contract (identical across all 4 repos). |
+| `data/sources.json` | Curated tiered source catalog used by the package at runtime. |
+| `src/contracts-v3.ts` | Rev-3 bridge types until every consumer is fully on `@ardurai/contracts`. |
 | `src/index.ts` | `runAggregation()` entrypoint + wiring. |
 | `src/sources.ts` | Curated tiered source + topic registry (≥ 20/topic). |
 | `src/ingest.ts` | Per-source fetch + parse → `RawItem[]`. |
@@ -59,7 +61,8 @@ flowchart LR
 | `src/cluster.ts` | Same-story clustering. |
 | `src/interaction.ts` | Aggregate interaction-metric capture + PII screening. |
 | `src/source-safety.ts` | SSRF-safe fetch primitives. |
-| `src/cli.ts` | Run one cycle, emit JSON. |
+| `src/runners.ts` | Uniform pipeline runner; installed as `ardur-news-aggregator`. |
+| `src/cli.ts` | Legacy cycle runner, emit JSON. |
 
 ## Grounding in the existing system
 
@@ -85,6 +88,20 @@ npm install
 npm run typecheck
 npm test          # contract + wiring smoke tests
 npm run build
+npm run test:package
+```
+
+Installed consumers can use either the package API:
+
+```js
+import { runAggregation } from '@ardurai/news-aggregator';
+```
+
+or the runner boundary:
+
+```bash
+npx ardur-news-aggregator --describe
+npx ardur-news-aggregator --out aggregation.json --provider deterministic
 ```
 
 Configuration is environment-driven; copy `.env.example` to `.env`. The default
