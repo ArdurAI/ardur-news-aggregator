@@ -1,52 +1,777 @@
 /**
- * Source registry — the curated, tiered, per-topic source list.
- *
- * SCAFFOLD ONLY. Seed the registry by extracting `newsSourceAllowList` and
- * `newsTopics` from `ardur.ai/main:scripts/news-sources.mjs`, then EXPAND each
- * topic to >= 20-30 sources (the existing list is the trusted core, not the
- * ceiling). Every source must declare a fetch strategy so ingestion is uniform.
+ * Source registry — curated, tiered, per-topic source list.
+ * Seeded from ardur.ai/main:scripts/news-sources.mjs and expanded to >=20 sources/topic.
+ * Tech-only scope: AI/ML, developer tools, cloud-native, security.
  */
 
 import type { SourceTier, TopicMeta } from './contracts.ts';
 
-/** How a single source is fetched. */
 export type FetchStrategy =
-  | { kind: 'rss'; feedUrl: string } // direct publisher RSS/Atom
-  | { kind: 'google-news-rss' } // topic query against the Google News meta-feed
-  | { kind: 'json'; endpoint: string }; // structured API (e.g. arXiv, vendor JSON)
+  | { kind: 'rss'; feedUrl: string }
+  | { kind: 'google-news-rss' }
+  | { kind: 'json'; endpoint: string };
 
 export interface SourceDefinition {
-  domain: string; // canonical host, e.g. "reuters.com"
-  label: string; // display name
+  domain: string;
+  label: string;
   tier: SourceTier;
-  topics: string[]; // topic ids this source covers
+  topics: string[];
   strategy: FetchStrategy;
-  /** Optional weight hint for credibility scoring (consumed downstream). */
   credibilityHint?: number;
 }
 
 export interface TopicDefinition extends TopicMeta {
-  query: string; // meta-feed query (when strategy === 'google-news-rss')
-  terms: string[]; // relevance terms for hint extraction
-  /** Minimum distinct sources required before the topic is considered healthy. */
-  diversityFloor: number; // default target: 20
+  query: string;
+  terms: string[];
+  diversityFloor: number;
 }
 
-/**
- * Load the full source registry. Implementations should return the curated
- * allow-list expanded to >= 20-30 sources/topic and validated against
- * `source-safety` (every feedUrl must normalize to a safe public https URL).
- */
+// ---------------------------------------------------------------------------
+// Topic definitions — kept in sync with news-sources.mjs
+// ---------------------------------------------------------------------------
+
+const TOPICS: TopicDefinition[] = [
+  {
+    id: 'all',
+    label: 'All Signals',
+    description: 'AI, models, DevOps, platform engineering, Kubernetes, and security signals.',
+    query: '',
+    terms: [],
+    diversityFloor: 20,
+  },
+  {
+    id: 'ai',
+    label: 'AI + LLMs',
+    description: 'Frontier AI, LLMs, agents, tooling, and applied AI product moves.',
+    query: '("AI agents" OR LLM OR "frontier AI" OR "generative AI" OR OpenAI OR Anthropic OR "AI model") when:1d',
+    terms: ['ai', 'llm', 'agent', 'model', 'openai', 'anthropic', 'google', 'mistral'],
+    diversityFloor: 20,
+  },
+  {
+    id: 'models',
+    label: 'Model Comparisons',
+    description: 'New model releases, benchmark debates, inference changes, and evaluation signals.',
+    query: '("LLM benchmark" OR "model comparison" OR "open model" OR "AI inference" OR "frontier model") when:7d',
+    terms: ['model', 'benchmark', 'eval', 'inference', 'open model', 'llm'],
+    diversityFloor: 20,
+  },
+  {
+    id: 'platform',
+    label: 'Platform Engineering',
+    description: 'Internal developer platforms, SRE, CI/CD, GitOps, and production engineering.',
+    query: '("platform engineering" OR "internal developer platform" OR GitOps OR "DevOps platform" OR "Kubernetes platform") when:7d',
+    terms: ['platform', 'devops', 'sre', 'gitops', 'ci/cd', 'developer'],
+    diversityFloor: 20,
+  },
+  {
+    id: 'kubernetes',
+    label: 'Kubernetes + Cloud Native',
+    description: 'Kubernetes, CNCF, containers, service mesh, and cloud-native operations.',
+    query: '(Kubernetes OR K8s OR CNCF OR "cloud native" OR "service mesh" OR containers) when:7d',
+    terms: ['kubernetes', 'k8s', 'cncf', 'container', 'mesh', 'helm'],
+    diversityFloor: 20,
+  },
+  {
+    id: 'security',
+    label: 'AI + Cloud Security',
+    description: 'AI security, software supply chain, cloud posture, identity, and runtime defense.',
+    query: '("AI security" OR "cloud security" OR "software supply chain security" OR "Kubernetes security" OR "identity security") when:7d',
+    terms: ['security', 'cyber', 'supply chain', 'iam', 'cloud', 'vulnerability'],
+    diversityFloor: 20,
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Source registry
+// ---------------------------------------------------------------------------
+
+const SOURCES: SourceDefinition[] = [
+  // ── AI + LLMs ──────────────────────────────────────────────────────────────
+  {
+    domain: 'openai.com',
+    label: 'OpenAI',
+    tier: 'primary',
+    topics: ['ai', 'models'],
+    strategy: { kind: 'rss', feedUrl: 'https://openai.com/news/rss.xml' },
+    credibilityHint: 0.9,
+  },
+  {
+    domain: 'anthropic.com',
+    label: 'Anthropic',
+    tier: 'primary',
+    topics: ['ai', 'models'],
+    strategy: { kind: 'rss', feedUrl: 'https://www.anthropic.com/rss.xml' },
+    credibilityHint: 0.9,
+  },
+  {
+    domain: 'deepmind.google',
+    label: 'Google DeepMind',
+    tier: 'primary',
+    topics: ['ai', 'models'],
+    strategy: { kind: 'rss', feedUrl: 'https://deepmind.google/blog/rss/' },
+    credibilityHint: 0.9,
+  },
+  {
+    domain: 'ai.meta.com',
+    label: 'Meta AI',
+    tier: 'primary',
+    topics: ['ai', 'models'],
+    strategy: { kind: 'rss', feedUrl: 'https://ai.meta.com/blog/rss/' },
+    credibilityHint: 0.9,
+  },
+  {
+    domain: 'blog.research.google',
+    label: 'Google Research',
+    tier: 'primary',
+    topics: ['ai', 'models'],
+    strategy: { kind: 'rss', feedUrl: 'https://blog.research.google/feeds/posts/default' },
+    credibilityHint: 0.9,
+  },
+  {
+    domain: 'huggingface.co',
+    label: 'Hugging Face',
+    tier: 'technical-news',
+    topics: ['ai', 'models'],
+    strategy: { kind: 'rss', feedUrl: 'https://huggingface.co/blog/feed.xml' },
+    credibilityHint: 0.85,
+  },
+  {
+    domain: 'export.arxiv.org',
+    label: 'arXiv cs.AI',
+    tier: 'paper',
+    topics: ['ai', 'models'],
+    strategy: { kind: 'rss', feedUrl: 'https://export.arxiv.org/rss/cs.AI' },
+    credibilityHint: 0.85,
+  },
+  {
+    domain: 'export.arxiv.org',
+    label: 'arXiv cs.LG',
+    tier: 'paper',
+    topics: ['ai', 'models'],
+    strategy: { kind: 'rss', feedUrl: 'https://export.arxiv.org/rss/cs.LG' },
+    credibilityHint: 0.85,
+  },
+  {
+    domain: 'export.arxiv.org',
+    label: 'arXiv cs.CL',
+    tier: 'paper',
+    topics: ['models'],
+    strategy: { kind: 'rss', feedUrl: 'https://export.arxiv.org/rss/cs.CL' },
+    credibilityHint: 0.85,
+  },
+  {
+    domain: 'techcrunch.com',
+    label: 'TechCrunch AI',
+    tier: 'news',
+    topics: ['ai', 'models'],
+    strategy: { kind: 'rss', feedUrl: 'https://techcrunch.com/category/artificial-intelligence/feed/' },
+    credibilityHint: 0.7,
+  },
+  {
+    domain: 'theverge.com',
+    label: 'The Verge AI',
+    tier: 'news',
+    topics: ['ai', 'models'],
+    strategy: { kind: 'rss', feedUrl: 'https://www.theverge.com/rss/ai-artificial-intelligence/index.xml' },
+    credibilityHint: 0.7,
+  },
+  {
+    domain: 'wired.com',
+    label: 'WIRED AI',
+    tier: 'news',
+    topics: ['ai', 'models'],
+    strategy: { kind: 'rss', feedUrl: 'https://www.wired.com/feed/tag/ai/latest/rss' },
+    credibilityHint: 0.75,
+  },
+  {
+    domain: 'venturebeat.com',
+    label: 'VentureBeat AI',
+    tier: 'news',
+    topics: ['ai', 'models'],
+    strategy: { kind: 'rss', feedUrl: 'https://venturebeat.com/category/ai/feed/' },
+    credibilityHint: 0.7,
+  },
+  {
+    domain: 'thenewstack.io',
+    label: 'The New Stack ML',
+    tier: 'technical-news',
+    topics: ['ai', 'models'],
+    strategy: { kind: 'rss', feedUrl: 'https://thenewstack.io/category/machine-learning/feed/' },
+    credibilityHint: 0.75,
+  },
+  {
+    domain: 'feed.infoq.com',
+    label: 'InfoQ AI/ML',
+    tier: 'technical-news',
+    topics: ['ai', 'models'],
+    strategy: { kind: 'rss', feedUrl: 'https://feed.infoq.com/news?topic=ai-ml-data-eng' },
+    credibilityHint: 0.8,
+  },
+  {
+    domain: 'zdnet.com',
+    label: 'ZDNet AI',
+    tier: 'news',
+    topics: ['ai', 'models'],
+    strategy: { kind: 'rss', feedUrl: 'https://www.zdnet.com/topic/artificial-intelligence/rss.xml' },
+    credibilityHint: 0.65,
+  },
+  {
+    domain: 'technologyreview.com',
+    label: 'MIT Technology Review',
+    tier: 'news',
+    topics: ['ai', 'models'],
+    strategy: { kind: 'rss', feedUrl: 'https://www.technologyreview.com/feed/' },
+    credibilityHint: 0.85,
+  },
+  {
+    domain: 'lmsys.org',
+    label: 'LMSYS Chatbot Arena',
+    tier: 'primary',
+    topics: ['models'],
+    strategy: { kind: 'rss', feedUrl: 'https://lmsys.org/blog/index.xml' },
+    credibilityHint: 0.9,
+  },
+  {
+    domain: 'blog.eleuther.ai',
+    label: 'EleutherAI',
+    tier: 'primary',
+    topics: ['models'],
+    strategy: { kind: 'rss', feedUrl: 'https://blog.eleuther.ai/rss/' },
+    credibilityHint: 0.85,
+  },
+  {
+    domain: 'oreilly.com',
+    label: "O'Reilly AI/ML Radar",
+    tier: 'technical-news',
+    topics: ['ai', 'models'],
+    strategy: { kind: 'rss', feedUrl: 'https://www.oreilly.com/radar/topics/ai-ml/feed/index.xml' },
+    credibilityHint: 0.8,
+  },
+  {
+    domain: 'simonwillison.net',
+    label: 'Simon Willison',
+    tier: 'technical-news',
+    topics: ['ai'],
+    strategy: { kind: 'rss', feedUrl: 'https://simonwillison.net/atom/everything/' },
+    credibilityHint: 0.85,
+  },
+  {
+    domain: 'paperswithcode.com',
+    label: 'Papers With Code',
+    tier: 'paper',
+    topics: ['ai', 'models'],
+    strategy: { kind: 'rss', feedUrl: 'https://paperswithcode.com/rss.xml' },
+    credibilityHint: 0.85,
+  },
+  {
+    domain: 'news.google.com',
+    label: 'Google News',
+    tier: 'news',
+    topics: ['ai'],
+    strategy: { kind: 'google-news-rss' },
+    credibilityHint: 0.65,
+  },
+  {
+    domain: 'news.google.com',
+    label: 'Google News',
+    tier: 'news',
+    topics: ['models'],
+    strategy: { kind: 'google-news-rss' },
+    credibilityHint: 0.65,
+  },
+
+  // ── Platform Engineering ───────────────────────────────────────────────────
+  {
+    domain: 'platformengineering.org',
+    label: 'Platform Engineering',
+    tier: 'primary',
+    topics: ['platform'],
+    strategy: { kind: 'rss', feedUrl: 'https://platformengineering.org/blog/rss' },
+    credibilityHint: 0.9,
+  },
+  {
+    domain: 'netflixtechblog.com',
+    label: 'Netflix Tech Blog',
+    tier: 'primary',
+    topics: ['platform'],
+    strategy: { kind: 'rss', feedUrl: 'https://netflixtechblog.com/feed' },
+    credibilityHint: 0.9,
+  },
+  {
+    domain: 'github.blog',
+    label: 'GitHub Engineering',
+    tier: 'primary',
+    topics: ['platform'],
+    strategy: { kind: 'rss', feedUrl: 'https://github.blog/category/engineering/feed/' },
+    credibilityHint: 0.9,
+  },
+  {
+    domain: 'engineering.atspotify.com',
+    label: 'Spotify Engineering',
+    tier: 'primary',
+    topics: ['platform'],
+    strategy: { kind: 'rss', feedUrl: 'https://engineering.atspotify.com/feed.xml' },
+    credibilityHint: 0.9,
+  },
+  {
+    domain: 'slack.engineering',
+    label: 'Slack Engineering',
+    tier: 'primary',
+    topics: ['platform'],
+    strategy: { kind: 'rss', feedUrl: 'https://slack.engineering/feed/' },
+    credibilityHint: 0.9,
+  },
+  {
+    domain: 'dropbox.tech',
+    label: 'Dropbox Tech',
+    tier: 'primary',
+    topics: ['platform'],
+    strategy: { kind: 'rss', feedUrl: 'https://dropbox.tech/feed' },
+    credibilityHint: 0.85,
+  },
+  {
+    domain: 'martinfowler.com',
+    label: 'Martin Fowler',
+    tier: 'primary',
+    topics: ['platform'],
+    strategy: { kind: 'rss', feedUrl: 'https://martinfowler.com/feed.atom' },
+    credibilityHint: 0.95,
+  },
+  {
+    domain: 'circleci.com',
+    label: 'CircleCI Blog',
+    tier: 'primary',
+    topics: ['platform'],
+    strategy: { kind: 'rss', feedUrl: 'https://circleci.com/blog/feed.xml' },
+    credibilityHint: 0.8,
+  },
+  {
+    domain: 'thenewstack.io',
+    label: 'The New Stack Platform',
+    tier: 'technical-news',
+    topics: ['platform'],
+    strategy: { kind: 'rss', feedUrl: 'https://thenewstack.io/category/platform-engineering/feed/' },
+    credibilityHint: 0.75,
+  },
+  {
+    domain: 'devops.com',
+    label: 'DevOps.com',
+    tier: 'technical-news',
+    topics: ['platform'],
+    strategy: { kind: 'rss', feedUrl: 'https://devops.com/feed/' },
+    credibilityHint: 0.7,
+  },
+  {
+    domain: 'feed.infoq.com',
+    label: 'InfoQ Architecture',
+    tier: 'technical-news',
+    topics: ['platform'],
+    strategy: { kind: 'rss', feedUrl: 'https://feed.infoq.com/architecture-design' },
+    credibilityHint: 0.8,
+  },
+  {
+    domain: 'dzone.com',
+    label: 'DZone DevOps',
+    tier: 'technical-news',
+    topics: ['platform'],
+    strategy: { kind: 'rss', feedUrl: 'https://dzone.com/devops-tutorials-tools-news/rss.xml' },
+    credibilityHint: 0.65,
+  },
+  {
+    domain: 'sdtimes.com',
+    label: 'SD Times',
+    tier: 'news',
+    topics: ['platform'],
+    strategy: { kind: 'rss', feedUrl: 'https://sdtimes.com/feed/' },
+    credibilityHint: 0.65,
+  },
+  {
+    domain: 'techcrunch.com',
+    label: 'TechCrunch Enterprise',
+    tier: 'news',
+    topics: ['platform'],
+    strategy: { kind: 'rss', feedUrl: 'https://techcrunch.com/category/enterprise/feed/' },
+    credibilityHint: 0.7,
+  },
+  {
+    domain: 'theregister.com',
+    label: 'The Register DevOps',
+    tier: 'news',
+    topics: ['platform', 'kubernetes'],
+    strategy: { kind: 'rss', feedUrl: 'https://www.theregister.com/devops/headlines.atom' },
+    credibilityHint: 0.7,
+  },
+  {
+    domain: 'hashicorp.com',
+    label: 'HashiCorp Blog',
+    tier: 'primary',
+    topics: ['platform'],
+    strategy: { kind: 'rss', feedUrl: 'https://www.hashicorp.com/blog/rss.xml' },
+    credibilityHint: 0.85,
+  },
+  {
+    domain: 'tailscale.com',
+    label: 'Tailscale Blog',
+    tier: 'primary',
+    topics: ['platform'],
+    strategy: { kind: 'rss', feedUrl: 'https://tailscale.com/blog/index.xml' },
+    credibilityHint: 0.8,
+  },
+  {
+    domain: 'engineering.linkedin.com',
+    label: 'LinkedIn Engineering',
+    tier: 'primary',
+    topics: ['platform'],
+    strategy: { kind: 'rss', feedUrl: 'https://engineering.linkedin.com/blog.rss' },
+    credibilityHint: 0.85,
+  },
+  {
+    domain: 'fly.io',
+    label: 'Fly.io Blog',
+    tier: 'primary',
+    topics: ['platform'],
+    strategy: { kind: 'rss', feedUrl: 'https://fly.io/blog/feed.xml' },
+    credibilityHint: 0.8,
+  },
+  {
+    domain: 'news.google.com',
+    label: 'Google News',
+    tier: 'news',
+    topics: ['platform'],
+    strategy: { kind: 'google-news-rss' },
+    credibilityHint: 0.65,
+  },
+
+  // ── Kubernetes + Cloud Native ──────────────────────────────────────────────
+  {
+    domain: 'kubernetes.io',
+    label: 'Kubernetes Blog',
+    tier: 'primary',
+    topics: ['kubernetes'],
+    strategy: { kind: 'rss', feedUrl: 'https://kubernetes.io/feed.xml' },
+    credibilityHint: 0.95,
+  },
+  {
+    domain: 'cncf.io',
+    label: 'CNCF',
+    tier: 'primary',
+    topics: ['kubernetes'],
+    strategy: { kind: 'rss', feedUrl: 'https://www.cncf.io/feed/' },
+    credibilityHint: 0.9,
+  },
+  {
+    domain: 'helm.sh',
+    label: 'Helm Blog',
+    tier: 'primary',
+    topics: ['kubernetes'],
+    strategy: { kind: 'rss', feedUrl: 'https://helm.sh/blog/index.xml' },
+    credibilityHint: 0.9,
+  },
+  {
+    domain: 'istio.io',
+    label: 'Istio',
+    tier: 'primary',
+    topics: ['kubernetes'],
+    strategy: { kind: 'rss', feedUrl: 'https://istio.io/latest/news/feed.xml' },
+    credibilityHint: 0.9,
+  },
+  {
+    domain: 'fluxcd.io',
+    label: 'Flux CD',
+    tier: 'primary',
+    topics: ['kubernetes'],
+    strategy: { kind: 'rss', feedUrl: 'https://fluxcd.io/blog/index.xml' },
+    credibilityHint: 0.9,
+  },
+  {
+    domain: 'grafana.com',
+    label: 'Grafana Blog',
+    tier: 'primary',
+    topics: ['kubernetes'],
+    strategy: { kind: 'rss', feedUrl: 'https://grafana.com/blog/index.xml' },
+    credibilityHint: 0.85,
+  },
+  {
+    domain: 'docker.com',
+    label: 'Docker Blog',
+    tier: 'primary',
+    topics: ['kubernetes'],
+    strategy: { kind: 'rss', feedUrl: 'https://www.docker.com/blog/feed/' },
+    credibilityHint: 0.9,
+  },
+  {
+    domain: 'prometheus.io',
+    label: 'Prometheus Blog',
+    tier: 'primary',
+    topics: ['kubernetes'],
+    strategy: { kind: 'rss', feedUrl: 'https://prometheus.io/blog/feed.xml' },
+    credibilityHint: 0.9,
+  },
+  {
+    domain: 'thenewstack.io',
+    label: 'The New Stack Kubernetes',
+    tier: 'technical-news',
+    topics: ['kubernetes'],
+    strategy: { kind: 'rss', feedUrl: 'https://thenewstack.io/category/kubernetes/feed/' },
+    credibilityHint: 0.75,
+  },
+  {
+    domain: 'feed.infoq.com',
+    label: 'InfoQ DevOps',
+    tier: 'technical-news',
+    topics: ['kubernetes'],
+    strategy: { kind: 'rss', feedUrl: 'https://feed.infoq.com/devops' },
+    credibilityHint: 0.8,
+  },
+  {
+    domain: 'devops.com',
+    label: 'DevOps.com',
+    tier: 'technical-news',
+    topics: ['kubernetes'],
+    strategy: { kind: 'rss', feedUrl: 'https://devops.com/feed/' },
+    credibilityHint: 0.7,
+  },
+  {
+    domain: 'blog.container-solutions.com',
+    label: 'Container Solutions',
+    tier: 'technical-news',
+    topics: ['kubernetes'],
+    strategy: { kind: 'rss', feedUrl: 'https://blog.container-solutions.com/rss.xml' },
+    credibilityHint: 0.75,
+  },
+  {
+    domain: 'techcrunch.com',
+    label: 'TechCrunch Enterprise',
+    tier: 'news',
+    topics: ['kubernetes'],
+    strategy: { kind: 'rss', feedUrl: 'https://techcrunch.com/category/enterprise/feed/' },
+    credibilityHint: 0.7,
+  },
+  {
+    domain: 'suse.com',
+    label: 'Rancher Blog',
+    tier: 'primary',
+    topics: ['kubernetes'],
+    strategy: { kind: 'rss', feedUrl: 'https://www.suse.com/c/rancherblog/feed/' },
+    credibilityHint: 0.8,
+  },
+  {
+    domain: 'cilium.io',
+    label: 'Cilium Blog',
+    tier: 'primary',
+    topics: ['kubernetes'],
+    strategy: { kind: 'rss', feedUrl: 'https://cilium.io/blog/rss.xml' },
+    credibilityHint: 0.9,
+  },
+  {
+    domain: 'opentelemetry.io',
+    label: 'OpenTelemetry Blog',
+    tier: 'primary',
+    topics: ['kubernetes'],
+    strategy: { kind: 'rss', feedUrl: 'https://opentelemetry.io/blog/index.xml' },
+    credibilityHint: 0.9,
+  },
+  {
+    domain: 'aws.amazon.com',
+    label: 'AWS Containers Blog',
+    tier: 'primary',
+    topics: ['kubernetes'],
+    strategy: { kind: 'rss', feedUrl: 'https://aws.amazon.com/blogs/containers/feed/' },
+    credibilityHint: 0.85,
+  },
+  {
+    domain: 'redhat.com',
+    label: 'Red Hat OpenShift Blog',
+    tier: 'primary',
+    topics: ['kubernetes'],
+    strategy: { kind: 'rss', feedUrl: 'https://www.redhat.com/en/rss/blog/channel/hybrid-cloud' },
+    credibilityHint: 0.85,
+  },
+  {
+    domain: 'news.google.com',
+    label: 'Google News',
+    tier: 'news',
+    topics: ['kubernetes'],
+    strategy: { kind: 'google-news-rss' },
+    credibilityHint: 0.65,
+  },
+
+  // ── AI + Cloud Security ────────────────────────────────────────────────────
+  {
+    domain: 'cisa.gov',
+    label: 'CISA',
+    tier: 'primary',
+    topics: ['security'],
+    strategy: { kind: 'rss', feedUrl: 'https://www.cisa.gov/blog.rss' },
+    credibilityHint: 0.95,
+  },
+  {
+    domain: 'snyk.io',
+    label: 'Snyk Blog',
+    tier: 'primary',
+    topics: ['security'],
+    strategy: { kind: 'rss', feedUrl: 'https://snyk.io/blog/feed/' },
+    credibilityHint: 0.85,
+  },
+  {
+    domain: 'cloud.google.com',
+    label: 'GCP Security Bulletins',
+    tier: 'primary',
+    topics: ['security'],
+    strategy: { kind: 'rss', feedUrl: 'https://cloud.google.com/feeds/gcp-security-bulletins.xml' },
+    credibilityHint: 0.9,
+  },
+  {
+    domain: 'aws.amazon.com',
+    label: 'AWS Security Bulletins',
+    tier: 'primary',
+    topics: ['security'],
+    strategy: { kind: 'rss', feedUrl: 'https://aws.amazon.com/security/security-bulletins/rss/feed/' },
+    credibilityHint: 0.9,
+  },
+  {
+    domain: 'thehackernews.com',
+    label: 'The Hacker News',
+    tier: 'security-news',
+    topics: ['security'],
+    strategy: { kind: 'rss', feedUrl: 'https://feeds.feedburner.com/TheHackersNews' },
+    credibilityHint: 0.75,
+  },
+  {
+    domain: 'bleepingcomputer.com',
+    label: 'BleepingComputer',
+    tier: 'security-news',
+    topics: ['security'],
+    strategy: { kind: 'rss', feedUrl: 'https://www.bleepingcomputer.com/feed/' },
+    credibilityHint: 0.75,
+  },
+  {
+    domain: 'krebsonsecurity.com',
+    label: 'Krebs on Security',
+    tier: 'security-news',
+    topics: ['security'],
+    strategy: { kind: 'rss', feedUrl: 'https://krebsonsecurity.com/feed/' },
+    credibilityHint: 0.85,
+  },
+  {
+    domain: 'darkreading.com',
+    label: 'Dark Reading',
+    tier: 'security-news',
+    topics: ['security'],
+    strategy: { kind: 'rss', feedUrl: 'https://www.darkreading.com/rss.xml' },
+    credibilityHint: 0.75,
+  },
+  {
+    domain: 'securityweek.com',
+    label: 'SecurityWeek',
+    tier: 'security-news',
+    topics: ['security'],
+    strategy: { kind: 'rss', feedUrl: 'https://feeds.feedburner.com/Securityweek' },
+    credibilityHint: 0.75,
+  },
+  {
+    domain: 'portswigger.net',
+    label: 'PortSwigger Daily Swig',
+    tier: 'security-news',
+    topics: ['security'],
+    strategy: { kind: 'rss', feedUrl: 'https://portswigger.net/daily-swig/rss' },
+    credibilityHint: 0.8,
+  },
+  {
+    domain: 'csoonline.com',
+    label: 'CSO Online',
+    tier: 'security-news',
+    topics: ['security'],
+    strategy: { kind: 'rss', feedUrl: 'https://www.csoonline.com/feed/' },
+    credibilityHint: 0.7,
+  },
+  {
+    domain: 'securityboulevard.com',
+    label: 'Security Boulevard',
+    tier: 'security-news',
+    topics: ['security'],
+    strategy: { kind: 'rss', feedUrl: 'https://securityboulevard.com/feed/' },
+    credibilityHint: 0.65,
+  },
+  {
+    domain: 'thenewstack.io',
+    label: 'The New Stack Security',
+    tier: 'technical-news',
+    topics: ['security'],
+    strategy: { kind: 'rss', feedUrl: 'https://thenewstack.io/category/security/feed/' },
+    credibilityHint: 0.75,
+  },
+  {
+    domain: 'wired.com',
+    label: 'WIRED Security',
+    tier: 'news',
+    topics: ['security'],
+    strategy: { kind: 'rss', feedUrl: 'https://www.wired.com/feed/category/security/latest/rss' },
+    credibilityHint: 0.75,
+  },
+  {
+    domain: 'techcrunch.com',
+    label: 'TechCrunch Security',
+    tier: 'news',
+    topics: ['security'],
+    strategy: { kind: 'rss', feedUrl: 'https://techcrunch.com/category/security/feed/' },
+    credibilityHint: 0.7,
+  },
+  {
+    domain: 'export.arxiv.org',
+    label: 'arXiv cs.CR',
+    tier: 'paper',
+    topics: ['security'],
+    strategy: { kind: 'rss', feedUrl: 'https://export.arxiv.org/rss/cs.CR' },
+    credibilityHint: 0.85,
+  },
+  {
+    domain: 'blog.aquasec.com',
+    label: 'Aqua Security Blog',
+    tier: 'primary',
+    topics: ['security'],
+    strategy: { kind: 'rss', feedUrl: 'https://blog.aquasec.com/rss.xml' },
+    credibilityHint: 0.85,
+  },
+  {
+    domain: 'blog.checkpoint.com',
+    label: 'Check Point Research',
+    tier: 'security-news',
+    topics: ['security'],
+    strategy: { kind: 'rss', feedUrl: 'https://blog.checkpoint.com/feed/' },
+    credibilityHint: 0.8,
+  },
+  {
+    domain: 'duo.com',
+    label: 'Duo Security Blog',
+    tier: 'primary',
+    topics: ['security'],
+    strategy: { kind: 'rss', feedUrl: 'https://duo.com/blog/rss.xml' },
+    credibilityHint: 0.8,
+  },
+  {
+    domain: 'news.google.com',
+    label: 'Google News',
+    tier: 'security-news',
+    topics: ['security'],
+    strategy: { kind: 'google-news-rss' },
+    credibilityHint: 0.65,
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
 export function loadSources(): SourceDefinition[] {
-  throw new Error('not implemented: seed from scripts/news-sources.mjs, expand to >=20/topic');
+  return SOURCES;
 }
 
-/** Load the topic definitions (ids, labels, queries, diversity floors). */
 export function loadTopics(): TopicDefinition[] {
-  throw new Error('not implemented: seed from scripts/news-sources.mjs newsTopics');
+  return TOPICS;
 }
 
-/** Sources that cover a given topic id. */
-export function sourcesForTopic(_topicId: string): SourceDefinition[] {
-  throw new Error('not implemented');
+export function sourcesForTopic(topicId: string): SourceDefinition[] {
+  if (topicId === 'all') return [];
+  return SOURCES.filter((s) => s.topics.includes(topicId));
 }

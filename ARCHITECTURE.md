@@ -182,3 +182,66 @@ artifacts (last-good-wins); no blank states.
 - `ardur-article-synthesizer` — stage 4
 - Each repo: `README.md`, `docs/spec.md`, `ARCHITECTURE.md` (this file), `src/contracts.ts`
   (shared), typed `src/` stubs, MIT `LICENSE`, CI stub.
+
+## 10. Product rules (aggregator-specific)
+
+### Tech-only scope filter
+
+The aggregator is scoped exclusively to technology content: AI/ML, developer tools,
+cloud-native infrastructure, and security. Sources are curated and tier-classified;
+no general-interest or non-tech outlets may be added to the source registry.
+
+### Source taxonomy tiers
+
+| Tier | Examples | Default credibilityHint |
+|------|----------|------------------------|
+| `primary` | openai.com, kubernetes.io, nist.gov, cisa.gov | 0.9 |
+| `paper` | arxiv.org cs.AI / cs.LG / cs.CL / cs.CR | 0.85 |
+| `technical-news` | thenewstack.io, infoq.com, huggingface.co | 0.75 |
+| `news` | techcrunch.com, theverge.com, wired.com | 0.7 |
+| `security-news` | thehackernews.com, bleepingcomputer.com | 0.75 |
+
+`credibilityHint` is consumed by `ardur-ranking-engine` as the seed for the credibility
+signal; it is not enforced by the aggregator.
+
+### Article lifecycle state machine
+
+```
+               ┌──────────────┐
+ ingested ────▶│  candidate   │
+               └──────┬───────┘
+                      │ ranked + selected into Top-10
+               ┌──────▼───────┐
+               │  top10_live  │◀─── refreshed each 6h cycle
+               └──────┬───────┘
+                      │ displaced by fresher Top-10 on next cycle
+               ┌──────▼───────┐
+               │archived_news │
+               └──────────────┘
+```
+
+- **candidate**: any `AggregatedItem` that survived dedup + clustering.
+- **top10_live**: selected into the current cycle's Top-10. `carriedOver=false` means
+  it entered fresh this cycle; `carriedOver=true` means it persisted from the prior cycle
+  within the stability margin (see `ardur-top10-engine`).
+- **archived_news**: was `top10_live` but displaced on the next cycle; retained in the
+  `AggregationArtifact` for audit and historical ranking.
+
+### GenZ-professional voice
+
+Synthesized articles (stage 4) target a **GenZ-professional tone**: technically precise,
+no jargon for jargon's sake, direct and opinionated, short punchy sentences. Not informal
+slang; not stiff corporate-speak. The aggregator does not enforce this — it is documented
+here so that `summaryHint` extraction and `sources.ts` curation do not pre-bias the text.
+
+### `claims[]` field rationale
+
+`AggregatedItem` carries an optional `claims?: string[]` (≤5 key phrases extracted from
+`title` + `summaryHint`). This is an additive change — no `SCHEMA_VERSION` bump required
+(consumers ignore unknown fields per the contract evolution rules in §5). Downstream uses:
+
+- `ardur-ranking-engine`: cross-reference claims across clusters for corroboration scoring.
+- `ardur-article-synthesizer`: use claims as fact-check anchors for provenance attribution.
+
+A sync issue should be filed against the other engine repos to document awareness of this
+field; the field is populated by the aggregator and passively visible downstream.

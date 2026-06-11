@@ -1,6 +1,6 @@
 # ardur-news-aggregator — Design Specification
 
-Schema version: `ardur-content-pipeline/v1` · Stage 1 of 4 · Status: **spec + scaffold**
+Schema version: `ardur-content-pipeline/v1` · Stage 1 of 4 · Status: **implemented** (2026-06-11)
 
 ---
 

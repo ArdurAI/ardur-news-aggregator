@@ -113,6 +113,8 @@ export interface AggregatedItem {
   interaction: InteractionMetrics;
   clusterId: string; // cluster this item was assigned to
   fingerprint: string; // dedup key (normalized title + canonical url)
+  /** Key topic labels / named entities extracted from title+hint, ≤5. Additive — no schema bump. */
+  claims?: string[];
 }
 
 export interface Cluster {

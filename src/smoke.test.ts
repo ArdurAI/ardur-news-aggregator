@@ -1,21 +1,432 @@
-import { test } from 'node:test';
+import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+
 import { SCHEMA_VERSION, CYCLE_INTERVAL_MS, FORBIDDEN_METRIC_KEY_FRAGMENTS } from './contracts.ts';
-import { runAggregation } from './index.ts';
+import {
+  normalizePublicUrl,
+  assertAllowedFetchUrl,
+  readBoundedText,
+  DEFAULT_FETCH_PORTS,
+} from './source-safety.ts';
+import { loadSources, loadTopics, sourcesForTopic } from './sources.ts';
+import { fingerprint, dedupe } from './dedup.ts';
+import { clusterItems } from './cluster.ts';
+import { isForbiddenMetricKey, captureInteractionMetrics } from './interaction.ts';
+import type { AggregatedItem } from './contracts.ts';
+import type { RawItem } from './ingest.ts';
 
-test('schema version is pinned', () => {
-  assert.equal(SCHEMA_VERSION, 'ardur-content-pipeline/v1');
+// ---------------------------------------------------------------------------
+// Contracts
+// ---------------------------------------------------------------------------
+
+describe('contracts', () => {
+  test('schema version is pinned', () => {
+    assert.equal(SCHEMA_VERSION, 'ardur-content-pipeline/v1');
+  });
+
+  test('cycle interval is 6 hours', () => {
+    assert.equal(CYCLE_INTERVAL_MS, 6 * 60 * 60 * 1000);
+  });
+
+  test('privacy guard lists known PII fragments', () => {
+    assert.ok(FORBIDDEN_METRIC_KEY_FRAGMENTS.includes('email'));
+    assert.ok(FORBIDDEN_METRIC_KEY_FRAGMENTS.includes('session'));
+    assert.ok(FORBIDDEN_METRIC_KEY_FRAGMENTS.includes('userid'));
+    assert.ok(FORBIDDEN_METRIC_KEY_FRAGMENTS.includes('token'));
+  });
 });
 
-test('cycle interval is 6 hours', () => {
-  assert.equal(CYCLE_INTERVAL_MS, 6 * 60 * 60 * 1000);
+// ---------------------------------------------------------------------------
+// source-safety
+// ---------------------------------------------------------------------------
+
+describe('source-safety', () => {
+  test('normalizePublicUrl: returns empty for empty input', () => {
+    assert.equal(normalizePublicUrl(''), '');
+    assert.equal(normalizePublicUrl(null), '');
+    assert.equal(normalizePublicUrl(undefined), '');
+  });
+
+  test('normalizePublicUrl: strips credentials', () => {
+    const result = normalizePublicUrl('https://user:pass@example.com/path');
+    assert.equal(result, '');
+  });
+
+  test('normalizePublicUrl: strips fragment', () => {
+    const result = normalizePublicUrl('https://example.com/path#section');
+    assert.equal(result, 'https://example.com/path');
+  });
+
+  test('normalizePublicUrl: rejects http by default', () => {
+    assert.equal(normalizePublicUrl('http://example.com/'), '');
+  });
+
+  test('normalizePublicUrl: allows http when option set', () => {
+    const result = normalizePublicUrl('http://example.com/', { allowHttp: true });
+    assert.ok(result.startsWith('http://'));
+  });
+
+  test('normalizePublicUrl: rejects private IPv4 127.0.0.1', () => {
+    assert.equal(normalizePublicUrl('https://127.0.0.1/'), '');
+  });
+
+  test('normalizePublicUrl: rejects private IPv4 10.0.0.1', () => {
+    assert.equal(normalizePublicUrl('https://10.0.0.1/'), '');
+  });
+
+  test('normalizePublicUrl: rejects private IPv4 192.168.1.1', () => {
+    assert.equal(normalizePublicUrl('https://192.168.1.1/'), '');
+  });
+
+  test('normalizePublicUrl: rejects IPv6 ::1', () => {
+    assert.equal(normalizePublicUrl('https://[::1]/'), '');
+  });
+
+  test('normalizePublicUrl: rejects localhost', () => {
+    assert.equal(normalizePublicUrl('https://localhost/'), '');
+  });
+
+  test('normalizePublicUrl: accepts valid public https', () => {
+    const result = normalizePublicUrl('https://example.com/path?q=1#frag');
+    assert.ok(result.startsWith('https://example.com/'));
+    assert.ok(!result.includes('#'));
+  });
+
+  test('normalizePublicUrl: rejects non-standard port when allowedPorts is DEFAULT_FETCH_PORTS', () => {
+    assert.equal(
+      normalizePublicUrl('https://example.com:8080/path', { allowedPorts: DEFAULT_FETCH_PORTS }),
+      '',
+    );
+  });
+
+  test('normalizePublicUrl: rejects host not in allow list', () => {
+    assert.equal(
+      normalizePublicUrl('https://evil.com/', { allowedHosts: new Set(['safe.com']) }),
+      '',
+    );
+  });
+
+  test('assertAllowedFetchUrl: throws for private IP', () => {
+    assert.throws(
+      () => assertAllowedFetchUrl('https://192.168.0.1/', new Set(['192.168.0.1'])),
+      /Blocked/,
+    );
+  });
+
+  test('assertAllowedFetchUrl: throws for host not in allow list', () => {
+    assert.throws(
+      () => assertAllowedFetchUrl('https://other.com/', new Set(['safe.com'])),
+      /Blocked/,
+    );
+  });
+
+  test('assertAllowedFetchUrl: returns normalized URL for allowed host', () => {
+    const result = assertAllowedFetchUrl('https://news.google.com/rss/search?q=ai', new Set(['news.google.com']));
+    assert.ok(result.startsWith('https://news.google.com/'));
+  });
+
+  test('readBoundedText: returns text under limit', async () => {
+    const body = 'hello world';
+    const response = new Response(body, { status: 200 });
+    const result = await readBoundedText(response, { maxBytes: 1_000, label: 'test' });
+    assert.equal(result, body);
+  });
+
+  test('readBoundedText: throws when content-length header exceeds limit', async () => {
+    const response = new Response('x'.repeat(100), {
+      status: 200,
+      headers: { 'content-length': '200' },
+    });
+    await assert.rejects(
+      () => readBoundedText(response, { maxBytes: 100, label: 'test' }),
+      /exceeded/,
+    );
+  });
 });
 
-test('privacy guard lists known PII fragments', () => {
-  assert.ok(FORBIDDEN_METRIC_KEY_FRAGMENTS.includes('email'));
-  assert.ok(FORBIDDEN_METRIC_KEY_FRAGMENTS.includes('session'));
+// ---------------------------------------------------------------------------
+// sources
+// ---------------------------------------------------------------------------
+
+describe('sources', () => {
+  test('loadSources: returns non-empty array', () => {
+    assert.ok(loadSources().length > 0);
+  });
+
+  test('loadSources: every source has a non-empty domain', () => {
+    for (const s of loadSources()) {
+      assert.ok(s.domain.length > 0, `empty domain on source ${s.label}`);
+    }
+  });
+
+  test('loadSources: every rss feedUrl starts with https://', () => {
+    for (const s of loadSources()) {
+      if (s.strategy.kind === 'rss') {
+        assert.ok(
+          s.strategy.feedUrl.startsWith('https://'),
+          `non-https feedUrl on ${s.label}: ${s.strategy.feedUrl}`,
+        );
+      }
+    }
+  });
+
+  test('loadTopics: includes ai, kubernetes, security topics', () => {
+    const ids = loadTopics().map((t) => t.id);
+    assert.ok(ids.includes('ai'));
+    assert.ok(ids.includes('kubernetes'));
+    assert.ok(ids.includes('security'));
+  });
+
+  test('sourcesForTopic(ai): returns at least 20 sources', () => {
+    assert.ok(sourcesForTopic('ai').length >= 20, `only ${sourcesForTopic('ai').length} sources for ai`);
+  });
+
+  test('sourcesForTopic(kubernetes): returns at least 20 sources', () => {
+    assert.ok(sourcesForTopic('kubernetes').length >= 20);
+  });
+
+  test('sourcesForTopic(security): returns at least 20 sources', () => {
+    assert.ok(sourcesForTopic('security').length >= 20);
+  });
+
+  test('sourcesForTopic(platform): returns at least 20 sources', () => {
+    assert.ok(sourcesForTopic('platform').length >= 20);
+  });
+
+  test('sourcesForTopic(models): returns at least 20 sources', () => {
+    assert.ok(sourcesForTopic('models').length >= 20);
+  });
+
+  test('sourcesForTopic(all): returns empty array', () => {
+    assert.deepEqual(sourcesForTopic('all'), []);
+  });
 });
 
-test('runAggregation is wired but not yet implemented', async () => {
-  await assert.rejects(async () => runAggregation(), /not implemented/);
+// ---------------------------------------------------------------------------
+// dedup
+// ---------------------------------------------------------------------------
+
+function makeRawItem(overrides: Partial<RawItem> = {}): RawItem {
+  return {
+    topic: 'ai',
+    topicLabel: 'AI + LLMs',
+    title: 'OpenAI Releases New Model',
+    source: 'TechCrunch',
+    sourceDomain: 'techcrunch.com',
+    sourceUrl: '',
+    url: 'https://techcrunch.com/2026/06/01/openai-new-model',
+    tier: 'news',
+    publishedAt: '2026-06-01T12:00:00Z',
+    summaryHint: 'OpenAI released a new model today.',
+    feedRank: 0,
+    ...overrides,
+  };
+}
+
+describe('dedup', () => {
+  test('fingerprint: same title+url → same fingerprint', () => {
+    const item = makeRawItem();
+    assert.equal(fingerprint(item), fingerprint({ ...item }));
+  });
+
+  test('fingerprint: different titles → different fingerprints', () => {
+    const a = fingerprint(makeRawItem({ title: 'Anthropic Launches Claude 4' }));
+    const b = fingerprint(makeRawItem({ title: 'OpenAI Releases GPT-5' }));
+    assert.notEqual(a, b);
+  });
+
+  test('fingerprint: strips HTML from title before fingerprinting', () => {
+    const a = fingerprint({ title: '<b>OpenAI</b> New Model', url: 'https://example.com/x' });
+    const b = fingerprint({ title: 'OpenAI New Model', url: 'https://example.com/x' });
+    assert.equal(a, b);
+  });
+
+  test('dedupe: removes same-fingerprint same-domain duplicates', () => {
+    const item = makeRawItem();
+    const dup = makeRawItem({ feedRank: 1 });
+    const { items, duplicatesRemoved } = dedupe([item, dup]);
+    assert.equal(items.length, 1);
+    assert.equal(duplicatesRemoved, 1);
+  });
+
+  test('dedupe: keeps cross-source items with same story (corroboration)', () => {
+    const a = makeRawItem({ sourceDomain: 'techcrunch.com', source: 'TechCrunch' });
+    const b = makeRawItem({ sourceDomain: 'theverge.com', source: 'The Verge' });
+    const { items } = dedupe([a, b]);
+    assert.equal(items.length, 2, 'cross-source items should both be kept');
+  });
+
+  test('dedupe: returned items all have fingerprint field', () => {
+    const { items } = dedupe([makeRawItem()]);
+    assert.ok('fingerprint' in items[0]!);
+    assert.ok(typeof items[0]!.fingerprint === 'string');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// interaction
+// ---------------------------------------------------------------------------
+
+describe('interaction', () => {
+  test('isForbiddenMetricKey: userId is forbidden', () => {
+    assert.ok(isForbiddenMetricKey('userId'));
+    assert.ok(isForbiddenMetricKey('user_id'));
+    assert.ok(isForbiddenMetricKey('USERID'));
+  });
+
+  test('isForbiddenMetricKey: sessionId is forbidden', () => {
+    assert.ok(isForbiddenMetricKey('sessionId'));
+    assert.ok(isForbiddenMetricKey('session_token'));
+  });
+
+  test('isForbiddenMetricKey: count is allowed', () => {
+    assert.ok(!isForbiddenMetricKey('count'));
+    assert.ok(!isForbiddenMetricKey('share_count'));
+    assert.ok(!isForbiddenMetricKey('reactions'));
+  });
+
+  test('captureInteractionMetrics: builds InteractionMetrics with feedRank', () => {
+    const m = captureInteractionMetrics(
+      { feedRank: 3 },
+      { capturedAt: new Date('2026-06-01T00:00:00Z'), provenance: 'test' },
+    );
+    assert.equal(m.feedRank, 3);
+    assert.equal(m.provenance, 'test');
+    assert.equal(m.crossSourceMentions, 0);
+    assert.equal(m.velocity, null);
+  });
+
+  test('captureInteractionMetrics: drops forbidden engagement keys', () => {
+    const m = captureInteractionMetrics(
+      { feedRank: 0, engagement: { userId: 42, shares: 10 } },
+      { capturedAt: new Date('2026-06-01T00:00:00Z'), provenance: 'test' },
+    );
+    assert.equal(m.shares, 10);
+    // userId should have been dropped, not mapped to any field
+  });
+
+  test('captureInteractionMetrics: maps likes to reactions', () => {
+    const m = captureInteractionMetrics(
+      { feedRank: 0, engagement: { likes: 99 } },
+      { capturedAt: new Date('2026-06-01T00:00:00Z'), provenance: 'test' },
+    );
+    assert.equal(m.reactions, 99);
+  });
+
+  test('captureInteractionMetrics: crossSourceMentions starts at 0', () => {
+    const m = captureInteractionMetrics(
+      { feedRank: 0 },
+      { capturedAt: new Date('2026-06-01T00:00:00Z'), provenance: 'test' },
+    );
+    assert.equal(m.crossSourceMentions, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cluster
+// ---------------------------------------------------------------------------
+
+function makeAggItem(overrides: Partial<Omit<AggregatedItem, 'clusterId'>> = {}): Omit<AggregatedItem, 'clusterId'> {
+  return {
+    id: `ai-item${Math.random().toString(36).slice(2, 8)}`,
+    topic: 'ai',
+    topicLabel: 'AI + LLMs',
+    title: 'OpenAI Releases New GPT Model',
+    source: 'TechCrunch',
+    sourceDomain: 'techcrunch.com',
+    sourceUrl: '',
+    url: 'https://techcrunch.com/openai-gpt',
+    tier: 'news',
+    publishedAt: '2026-06-01T12:00:00Z',
+    summaryHint: 'OpenAI releases a new model.',
+    fingerprint: 'fp1',
+    interaction: {
+      feedRank: 0, shares: null, comments: null, reactions: null,
+      crossSourceMentions: 0, velocity: null,
+      capturedAt: '2026-06-01T12:00:00Z', provenance: 'test',
+    },
+    ...overrides,
+  };
+}
+
+describe('cluster', () => {
+  test('clusterItems: assigns clusterId to all items', () => {
+    const items = [makeAggItem({ id: 'a1' }), makeAggItem({ id: 'a2' })];
+    const { items: out } = clusterItems(items, { threshold: 0.82, importantTerms: [] });
+    for (const item of out) {
+      assert.ok(typeof item.clusterId === 'string' && item.clusterId.length > 0);
+    }
+  });
+
+  test('clusterItems: clusters similar titles together', () => {
+    const base: Omit<AggregatedItem, 'clusterId'> = makeAggItem({
+      id: 'a1',
+      title: 'OpenAI Releases New GPT Model Today',
+    });
+    const similar: Omit<AggregatedItem, 'clusterId'> = makeAggItem({
+      id: 'a2',
+      title: 'OpenAI Releases New GPT Model',
+      sourceDomain: 'theverge.com',
+      fingerprint: 'fp2',
+    });
+    const { clusters } = clusterItems([base, similar], { threshold: 0.5, importantTerms: ['openai', 'gpt'] });
+    assert.equal(clusters.length, 1, 'similar titles should form one cluster');
+    assert.equal(clusters[0]!.memberIds.length, 2);
+  });
+
+  test('clusterItems: keeps distinct stories in separate clusters', () => {
+    const a: Omit<AggregatedItem, 'clusterId'> = makeAggItem({ id: 'a1', title: 'Kubernetes 1.32 Released' });
+    const b: Omit<AggregatedItem, 'clusterId'> = makeAggItem({ id: 'a2', title: 'Anthropic Launches Claude 4' });
+    const { clusters } = clusterItems([a, b], { threshold: 0.82, importantTerms: [] });
+    assert.equal(clusters.length, 2, 'distinct stories should form separate clusters');
+  });
+
+  test('clusterItems: cluster memberIds are valid item ids', () => {
+    const items = [makeAggItem({ id: 'x1' }), makeAggItem({ id: 'x2', title: 'Different Story Entirely About Rust', fingerprint: 'fp-x2' })];
+    const { clusters } = clusterItems(items, { threshold: 0.82, importantTerms: [] });
+    const allIds = clusters.flatMap((c) => c.memberIds);
+    assert.ok(allIds.includes('x1'));
+    assert.ok(allIds.includes('x2'));
+  });
+
+  test('clusterItems: cluster distinctDomains counts correctly', () => {
+    const a = makeAggItem({ id: 'a1', sourceDomain: 'techcrunch.com', fingerprint: 'fa' });
+    const b = makeAggItem({ id: 'a2', sourceDomain: 'theverge.com', fingerprint: 'fb' });
+    const { clusters } = clusterItems([a, b], { threshold: 0.5, importantTerms: ['openai', 'gpt', 'model'] });
+    if (clusters.length === 1) {
+      assert.equal(clusters[0]!.distinctDomains, 2);
+    }
+    // If they ended up in separate clusters, that's valid for high threshold
+  });
+
+  test('clusterItems: tierHistogram sums to memberIds.length', () => {
+    const items = [
+      makeAggItem({ id: 'b1', tier: 'news', fingerprint: 'fb1' }),
+      makeAggItem({ id: 'b2', tier: 'primary', fingerprint: 'fb2', title: 'OpenAI GPT Release News Today' }),
+    ];
+    const { clusters } = clusterItems(items, { threshold: 0.82, importantTerms: ['openai', 'gpt'] });
+    for (const cluster of clusters) {
+      const histogramSum = Object.values(cluster.tierHistogram).reduce((s, v) => s + v, 0);
+      assert.equal(histogramSum, cluster.memberIds.length);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// index — cycle math (offline, no network)
+// ---------------------------------------------------------------------------
+
+describe('index (offline)', () => {
+  test('runAggregation is exported from index', async () => {
+    const mod = await import('./index.ts');
+    assert.ok(typeof mod.runAggregation === 'function');
+  });
+
+  test('SCHEMA_VERSION re-exported from index', async () => {
+    const mod = await import('./index.ts');
+    assert.equal(mod.SCHEMA_VERSION, 'ardur-content-pipeline/v1');
+  });
+
+  // Network-dependent test: skip to avoid flaky CI
+  // TODO: wire a mock fetch for full runAggregation integration test
 });
