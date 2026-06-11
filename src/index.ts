@@ -58,6 +58,8 @@ export interface AggregationOptions {
   perSourceTimeoutMs?: number;
   concurrency?: number;
   now?: Date;
+  /** Pin the artifact's runId for deterministic output. When absent, a random UUID is generated. */
+  runId?: string;
   /** Run the full ETL (fetch bodies + extract facts). Defaults to ARDUR_ETL_ENABLED env var. */
   etlEnabled?: boolean;
   /** Max article fetches per topic during ETL (budget guard). Default: 30. */
@@ -245,7 +247,7 @@ export async function runAggregation(options: AggregationOptions = {}): Promise<
   const perSourceTimeoutMs = options.perSourceTimeoutMs ?? 30_000;
   const concurrency = options.concurrency ?? 10;
   const cycle = buildCycle(now, options.cycle);
-  const runId = randomUUID();
+  const runId = options.runId ?? randomUUID();
   const warnings: string[] = [];
 
   const etlEnabled =

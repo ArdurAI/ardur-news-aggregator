@@ -28,6 +28,13 @@ import { CONTRACT_REVISION_V3 } from './contracts-v3.ts';
 import type { ExtractedFact, FactProvenance } from './contracts-v3.ts';
 import { classifyDiscoveredDomain } from './search-provider.ts';
 import { docIdFromUrl, contentHashOf } from './etl-store.ts';
+import {
+  buildDescribeOutput,
+  classifyError,
+  deriveRunId,
+  buildHermeticArtifact,
+  parseRunnerArgs,
+} from './runners.ts';
 
 // ---------------------------------------------------------------------------
 // Contracts
@@ -695,5 +702,230 @@ describe('A5: copyright-guard', () => {
     const quote = facts[0]!.provenance[0]?.quote ?? '';
     const wordCount = quote.trim().split(/\s+/).filter((w) => !w.endsWith('…')).length;
     assert.ok(wordCount <= 25, `trimmed quote has ${wordCount} words`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runners — agent-readiness CLI
+// ---------------------------------------------------------------------------
+
+describe('runners: --describe', () => {
+  test('buildDescribeOutput: has correct name and stage', () => {
+    const spec = buildDescribeOutput();
+    assert.equal(spec.name, 'news-aggregator');
+    assert.equal(spec.stage, 'aggregation');
+  });
+
+  test('buildDescribeOutput: contract fields match @ardurai/contracts exports', () => {
+    const spec = buildDescribeOutput();
+    assert.equal(spec.contract.schemaVersion, SCHEMA_VERSION);
+    assert.equal(spec.contract.contractRevision, CONTRACT_REVISION);
+  });
+
+  test('buildDescribeOutput: input is null (Stage 1 has no upstream)', () => {
+    assert.equal(buildDescribeOutput().input, null);
+  });
+
+  test('buildDescribeOutput: output schema references schemaVersion enum', () => {
+    const spec = buildDescribeOutput();
+    const output = spec.output as Record<string, unknown>;
+    const props = (output['properties'] as Record<string, unknown>);
+    const sv = props['schemaVersion'] as Record<string, unknown>;
+    assert.deepEqual(sv['enum'], [SCHEMA_VERSION]);
+  });
+
+  test('buildDescribeOutput: output schema lists required envelope fields', () => {
+    const spec = buildDescribeOutput();
+    const output = spec.output as Record<string, unknown>;
+    const required = output['required'] as string[];
+    assert.ok(required.includes('schemaVersion'));
+    assert.ok(required.includes('artifact'));
+    assert.ok(required.includes('runId'));
+    assert.ok(required.includes('data'));
+  });
+
+  test('buildDescribeOutput: flags include all uniform-CLI flags', () => {
+    const flags = buildDescribeOutput().flags;
+    assert.ok('--in' in flags);
+    assert.ok('--out' in flags);
+    assert.ok('--provider' in flags);
+    assert.ok('--now' in flags);
+    assert.ok('--run-id' in flags);
+    assert.ok('--describe' in flags);
+    assert.ok('--json-errors' in flags);
+    assert.ok('--no-network' in flags);
+    assert.ok('--fixtures' in flags);
+  });
+
+  test('buildDescribeOutput: output is serialisable to JSON without throwing', () => {
+    assert.doesNotThrow(() => JSON.stringify(buildDescribeOutput()));
+  });
+});
+
+describe('runners: parseRunnerArgs', () => {
+  test('defaults: all values at expected defaults', () => {
+    const args = parseRunnerArgs([]);
+    assert.equal(args.inPath, null);
+    assert.equal(args.outPath, null);
+    assert.equal(args.nowIso, null);
+    assert.equal(args.runId, null);
+    assert.equal(args.doDescribe, false);
+    assert.equal(args.jsonErrors, false);
+    assert.equal(args.noNetwork, false);
+    assert.equal(args.fixturesDir, null);
+    assert.equal(args.etlEnabled, false);
+    assert.equal(args.maxAgeHours, 36);
+    assert.equal(args.timeoutMs, 15_000);
+    assert.equal(args.concurrency, 10);
+  });
+
+  test('--describe sets doDescribe=true', () => {
+    assert.equal(parseRunnerArgs(['--describe']).doDescribe, true);
+  });
+
+  test('--json-errors sets jsonErrors=true', () => {
+    assert.equal(parseRunnerArgs(['--json-errors']).jsonErrors, true);
+  });
+
+  test('--no-network sets noNetwork=true', () => {
+    assert.equal(parseRunnerArgs(['--no-network']).noNetwork, true);
+  });
+
+  test('--fixtures implies noNetwork=true', () => {
+    const args = parseRunnerArgs(['--fixtures', '/tmp/feeds']);
+    assert.equal(args.noNetwork, true);
+    assert.equal(args.fixturesDir, '/tmp/feeds');
+  });
+
+  test('--out - maps to null (stdout)', () => {
+    assert.equal(parseRunnerArgs(['--out', '-']).outPath, null);
+  });
+
+  test('--out <path> maps to path', () => {
+    assert.equal(parseRunnerArgs(['--out', '/tmp/out.json']).outPath, '/tmp/out.json');
+  });
+
+  test('--in - maps to null', () => {
+    assert.equal(parseRunnerArgs(['--in', '-']).inPath, null);
+  });
+
+  test('--now and --run-id are captured', () => {
+    const args = parseRunnerArgs(['--now', '2026-06-11T06:00:00.000Z', '--run-id', 'abc-123']);
+    assert.equal(args.nowIso, '2026-06-11T06:00:00.000Z');
+    assert.equal(args.runId, 'abc-123');
+  });
+
+  test('--etl sets etlEnabled=true', () => {
+    assert.equal(parseRunnerArgs(['--etl']).etlEnabled, true);
+  });
+
+  test('--etl-budget sets budget', () => {
+    assert.equal(parseRunnerArgs(['--etl-budget', '5']).etlFetchBudgetPerTopic, 5);
+  });
+
+  test('--max-age-hours sets maxAgeHours', () => {
+    assert.equal(parseRunnerArgs(['--max-age-hours', '48']).maxAgeHours, 48);
+  });
+});
+
+describe('runners: deriveRunId', () => {
+  test('same input → same output', () => {
+    const iso = '2026-06-11T06:00:00.000Z';
+    assert.equal(deriveRunId(iso), deriveRunId(iso));
+  });
+
+  test('different inputs → different outputs', () => {
+    assert.notEqual(
+      deriveRunId('2026-06-11T06:00:00.000Z'),
+      deriveRunId('2026-06-11T12:00:00.000Z'),
+    );
+  });
+
+  test('output is 32 hex chars', () => {
+    assert.match(deriveRunId('2026-06-11T06:00:00.000Z'), /^[0-9a-f]{32}$/);
+  });
+});
+
+describe('runners: buildHermeticArtifact', () => {
+  const NOW_ISO = '2026-06-11T07:30:00.000Z';
+  const NOW = new Date(NOW_ISO);
+  const RUN_ID = deriveRunId(NOW_ISO);
+
+  test('schemaVersion matches SCHEMA_VERSION from @ardurai/contracts', () => {
+    const a = buildHermeticArtifact(NOW, RUN_ID);
+    assert.equal(a.schemaVersion, SCHEMA_VERSION);
+  });
+
+  test('contractRevision matches CONTRACT_REVISION from @ardurai/contracts', () => {
+    const a = buildHermeticArtifact(NOW, RUN_ID);
+    assert.equal(a.contractRevision, CONTRACT_REVISION);
+  });
+
+  test('artifact field is "aggregation"', () => {
+    assert.equal(buildHermeticArtifact(NOW, RUN_ID).artifact, 'aggregation');
+  });
+
+  test('runId matches supplied value', () => {
+    assert.equal(buildHermeticArtifact(NOW, RUN_ID).runId, RUN_ID);
+  });
+
+  test('generatedAt matches --now input', () => {
+    assert.equal(buildHermeticArtifact(NOW, RUN_ID).generatedAt, NOW_ISO);
+  });
+
+  test('cycle window is floored to 6h boundary', () => {
+    const a = buildHermeticArtifact(NOW, RUN_ID);
+    assert.equal(a.cycle.windowStart, '2026-06-11T06:00:00.000Z');
+    assert.equal(a.cycle.windowEnd, '2026-06-11T12:00:00.000Z');
+  });
+
+  test('data collections are empty (hermetic)', () => {
+    const a = buildHermeticArtifact(NOW, RUN_ID);
+    assert.deepEqual(a.data.itemsByTopic, {});
+    assert.deepEqual(a.data.clustersByTopic, {});
+    assert.deepEqual(a.data.coverageByTopic, {});
+  });
+
+  test('byte-identical output for identical inputs (determinism)', () => {
+    const a = JSON.stringify(buildHermeticArtifact(NOW, RUN_ID));
+    const b = JSON.stringify(buildHermeticArtifact(NOW, RUN_ID));
+    assert.equal(a, b);
+  });
+
+  test('passes assertCompatibleArtifact gate', () => {
+    const a = buildHermeticArtifact(NOW, RUN_ID);
+    const { stage, warnings } = assertCompatibleArtifact(a, 'aggregation');
+    assert.equal(stage, 'aggregation');
+    assert.equal(warnings.length, 0);
+  });
+});
+
+describe('runners: classifyError', () => {
+  test('stage is always "aggregation"', () => {
+    assert.equal(classifyError(new Error('boom')).stage, 'aggregation');
+    assert.equal(classifyError('string error').stage, 'aggregation');
+  });
+
+  test('network-like message → NETWORK_ERROR', () => {
+    assert.equal(classifyError(new Error('fetch failed ECONNREFUSED')).code, 'NETWORK_ERROR');
+    assert.equal(classifyError(new Error('timeout exceeded')).code, 'NETWORK_ERROR');
+  });
+
+  test('JSON parse error → PARSE_ERROR', () => {
+    assert.equal(classifyError(new Error('Unexpected token in JSON')).code, 'PARSE_ERROR');
+  });
+
+  test('schema error → SCHEMA_ERROR', () => {
+    assert.equal(classifyError(new Error('schemaVersion mismatch')).code, 'SCHEMA_ERROR');
+  });
+
+  test('unknown error → UNKNOWN_ERROR', () => {
+    assert.equal(classifyError(new Error('something else')).code, 'UNKNOWN_ERROR');
+  });
+
+  test('non-Error → UNKNOWN_ERROR with stringified message', () => {
+    const result = classifyError(42);
+    assert.equal(result.code, 'UNKNOWN_ERROR');
+    assert.equal(result.message, '42');
   });
 });
