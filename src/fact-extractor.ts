@@ -333,13 +333,45 @@ function deterministicExtract(
   return facts.slice(0, 8); // deterministic floor: max 8 facts per source
 }
 
+// ── eTLD+1 helper ─────────────────────────────────────────────────────────────
+
+// Known two-label public suffixes (heuristic subset of the ICANN Public Suffix List).
+const MULTI_LEVEL_PUBLIC_SUFFIXES = new Set([
+  'co.uk','org.uk','me.uk','net.uk','ltd.uk','plc.uk','sch.uk',
+  'com.au','net.au','org.au','edu.au','gov.au','id.au','asn.au',
+  'co.nz','net.nz','org.nz','edu.nz','govt.nz','geek.nz','school.nz',
+  'co.in','org.in','net.in','nic.in','ac.in','edu.in','res.in',
+  'co.jp','or.jp','ne.jp','ac.jp','ad.jp','ed.jp','go.jp',
+  'co.za','org.za','net.za','ac.za','edu.za',
+  'com.br','org.br','net.br','edu.br','gov.br',
+  'com.cn','org.cn','net.cn','edu.cn','gov.cn',
+  'com.mx','org.mx','net.mx','edu.mx',
+  'com.sg','org.sg','net.sg','edu.sg',
+  'co.id','or.id','net.id','ac.id','sch.id','go.id','mil.id','my.id',
+]);
+
+/**
+ * Returns the registrable eTLD+1 for a hostname, stripping leading `www.`.
+ * E.g.: `blog.techcrunch.com` → `techcrunch.com`, `news.bbc.co.uk` → `bbc.co.uk`.
+ */
+export function etld1(hostname: string): string {
+  const h = hostname.toLowerCase().replace(/^www\./, '');
+  const parts = h.split('.');
+  if (parts.length <= 2) return h;
+  const twoLabel = parts.slice(-2).join('.');
+  if (MULTI_LEVEL_PUBLIC_SUFFIXES.has(twoLabel)) {
+    return parts.slice(-3).join('.');
+  }
+  return twoLabel;
+}
+
 // ── Corroboration merging ────────────────────────────────────────────────────
 
 /**
- * For each fact, corroboration = number of DISTINCT source owners (domains) across
- * all docs in the cluster that contributed any content. This reflects cluster-level
- * corroboration so that facts from a well-sourced cluster score higher than
- * single-source facts.
+ * For each fact, corroboration = number of DISTINCT registrable eTLD+1 owners
+ * across all docs in the cluster that contributed any content. Uses eTLD+1 so
+ * a single publisher's subdomains (blog.example.com, news.example.com) count as
+ * one owner, not two. Matches ardur-ranking-engine #23 definition.
  *
  * Coordination note: ardur-ranking-engine #15 expects this definition — do not
  * change the owner-dedup logic without updating the ranking engine in lockstep.
@@ -348,7 +380,7 @@ function computeCorroboration(
   facts: Omit<ExtractedFact, 'corroboration'>[],
   allDocsInCluster: SourceDocument[],
 ): ExtractedFact[] {
-  const allDomains = new Set(allDocsInCluster.map((d) => d.sourceDomain));
+  const allDomains = new Set(allDocsInCluster.map((d) => etld1(d.sourceDomain)));
   const clusterCorroboration = Math.max(allDomains.size, 1);
 
   return facts.map((fact) => {

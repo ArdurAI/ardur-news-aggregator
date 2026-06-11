@@ -187,6 +187,7 @@ async function runEtlForTopic(
         publishedAt: item.publishedAt,
         source: item.source,
         tier: item.tier,
+        now: opts.now,
       });
       const { doc, body } = fetched;
 

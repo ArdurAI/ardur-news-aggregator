@@ -148,6 +148,8 @@ export interface ArticleFetchOpts {
   tier?: SourceTier;
   etag?: string;
   lastModified?: string;
+  /** Pin the fetch timestamp for deterministic artifact output when ETL is enabled. */
+  now?: Date;
 }
 
 /**
@@ -159,7 +161,7 @@ export async function fetchArticle(
   url: string,
   opts: ArticleFetchOpts = {},
 ): Promise<FetchedArticle> {
-  const fetchedAt = new Date().toISOString();
+  const fetchedAt = (opts.now ?? new Date()).toISOString();
 
   let canonicalUrl: string;
   try {

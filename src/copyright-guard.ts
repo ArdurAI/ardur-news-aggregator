@@ -66,7 +66,7 @@ function ngrams(text: string, n: number): Set<string> {
  * re-expressing the fact in original language.
  */
 export function hasForbiddenVerbatimOverlap(statement: string, sourceBody: string): boolean {
-  if (!sourceBody || statement.length < 40) return false;
+  if (!sourceBody) return false;
   const statementGrams = ngrams(statement, 8);
   if (statementGrams.size === 0) return false;
   const bodyGrams = ngrams(sourceBody, 8);

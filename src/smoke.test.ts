@@ -39,6 +39,7 @@ import {
   buildHermeticArtifact,
   parseRunnerArgs,
 } from './runners.ts';
+import { etld1 } from './fact-extractor.ts';
 
 // ---------------------------------------------------------------------------
 // Contracts
@@ -101,6 +102,12 @@ describe('contracts', () => {
       schemaVersion: 'ardur-content-pipeline/v1' as const,
       contractRevision: 999,
       artifact: 'aggregation' as const,
+      runId: 'test-run-fwd',
+      upstreamRunId: null,
+      generatedAt: '2026-06-11T00:00:00.000Z',
+      cycle: { id: '2026-06-11T00:00:00.000Z', windowStart: '2026-06-11T00:00:00.000Z', windowEnd: '2026-06-11T06:00:00.000Z' },
+      topics: [],
+      warnings: [],
       data: { itemsByTopic: {}, clustersByTopic: {}, coverageByTopic: {} },
     };
     const { warnings } = assertCompatibleArtifact(envelope, 'aggregation');
@@ -1235,5 +1242,225 @@ describe('runners: classifyError', () => {
     const result = classifyError(42);
     assert.equal(result.code, 'UNKNOWN_ERROR');
     assert.equal(result.message, '42');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #18 — fetchedAt is pinned by opts.now (ETL determinism)
+// ---------------------------------------------------------------------------
+
+describe('#18: fetchedAt pinned by opts.now', () => {
+  test('fetchArticle: blocked URL uses opts.now for fetchedAt, not wall clock', async () => {
+    // 127.0.0.1 is always SSRF-blocked → hits the early-return path with fetchedAt stamped
+    const pinned = new Date('2026-06-11T06:00:00.000Z');
+    const result = await fetchArticle('https://127.0.0.1/article', { title: 'test', now: pinned });
+    assert.equal(result.doc.fetchedAt, pinned.toISOString(), 'fetchedAt must equal opts.now');
+  });
+
+  test('fetchArticle: opts.now=undefined falls back to real clock (not fixed)', async () => {
+    const before = new Date();
+    const result = await fetchArticle('https://127.0.0.1/article', { title: 'test' });
+    const after = new Date();
+    const fetchedAt = new Date(result.doc.fetchedAt);
+    // fetchedAt must be between before and after (real wall clock, not a fixed value)
+    assert.ok(fetchedAt >= before && fetchedAt <= after, 'fetchedAt should be near wall clock when now is unset');
+  });
+
+  test('extractFacts: generatedAt respects pinned now when ETL path uses it', async () => {
+    const DOC_ID = '0'.repeat(40);
+    const NOW = new Date('2026-06-11T08:00:00.000Z');
+    const BODY = 'Anthropic released Claude 4 with 1 trillion parameters in June 2026. '
+      + 'The model achieved 95% accuracy on benchmarks.';
+    const pair: { doc: FullSourceDocument; body: string } = {
+      doc: {
+        id: DOC_ID,
+        url: 'https://test.com/a',
+        source: 'test',
+        sourceDomain: 'test.com',
+        tier: 'news',
+        title: 'Test',
+        publishedAt: '2026-06-11T00:00:00Z',
+        fetchedAt: NOW.toISOString(),
+        extraction: 'full',
+        accessPolicy: 'allowed',
+        wordCount: 20,
+        lang: 'en',
+        contentHash: 'abc',
+      },
+      body: BODY,
+    };
+    const result = await extractFacts([pair], 'ai', 'cluster-18', NOW);
+    for (const fact of result.facts) {
+      assert.equal(fact.extractedBy.generatedAt, NOW.toISOString(), 'generatedAt must equal pinned now');
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #22 — A5 copyright guard: short statements must be screened
+// ---------------------------------------------------------------------------
+
+describe('#22: A5 screens short statements (no < 40-char bypass)', () => {
+  test('hasForbiddenVerbatimOverlap: short statement with 8-gram match IS flagged', () => {
+    // 8 words, under 40 chars — previously bypassed the guard
+    const statement = 'one two three four five six seven eight.';
+    const body = 'the article said one two three four five six seven eight different things.';
+    assert.ok(
+      hasForbiddenVerbatimOverlap(statement, body),
+      'short statement with verbatim 8-gram must be flagged (not bypassed)',
+    );
+  });
+
+  test('hasForbiddenVerbatimOverlap: < 8 tokens → no grams → false regardless of length', () => {
+    // Under 8 words: can never have an 8-gram, so still returns false
+    const statement = 'one two three four five.';
+    const body = 'one two three four five different things in the article.';
+    assert.ok(!hasForbiddenVerbatimOverlap(statement, body), 'fewer than 8 tokens cannot form an 8-gram');
+  });
+
+  test('validateFactsForWire: drops short statement with verbatim overlap (fail-closed)', () => {
+    const body = 'one two three four five six seven eight different things here and more';
+    // Short statement that contains a verbatim 8-gram with the source body
+    const statement = 'one two three four five six seven eight.';
+    function makeShortFact(): ExtractedFact {
+      return {
+        id: 'short-1',
+        topic: 'ai',
+        clusterId: 'c1',
+        statement,
+        entities: [],
+        provenance: [{ sourceDocId: 'doc-1', sourceDomain: 'example.com', url: 'https://example.com/a' }],
+        corroboration: 1,
+        confidence: 'low',
+        extractedBy: { provider: 'deterministic', model: 'regex-v1', status: 'fallback', generatedAt: '2026-06-11T00:00:00Z' },
+      };
+    }
+    const bodyMap = new Map([['doc-1', body]]);
+    const { facts, violations } = validateFactsForWire([makeShortFact()], bodyMap);
+    assert.equal(facts.length, 0, 'short verbatim statement must be dropped (fail-closed)');
+    assert.ok(violations.some((v) => v.includes('verbatim')), 'violation must note verbatim overlap');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #23 — corroboration uses eTLD+1, not host-minus-www
+// ---------------------------------------------------------------------------
+
+describe('#23: eTLD+1 for corroboration owner-dedup', () => {
+  test('etld1: strips www and returns eTLD+1', () => {
+    assert.equal(etld1('www.techcrunch.com'), 'techcrunch.com');
+    assert.equal(etld1('techcrunch.com'), 'techcrunch.com');
+    assert.equal(etld1('blog.techcrunch.com'), 'techcrunch.com');
+  });
+
+  test('etld1: handles multi-level TLDs (.co.uk)', () => {
+    assert.equal(etld1('news.bbc.co.uk'), 'bbc.co.uk');
+    assert.equal(etld1('www.bbc.co.uk'), 'bbc.co.uk');
+  });
+
+  test('etld1: two-part domain unchanged', () => {
+    assert.equal(etld1('example.com'), 'example.com');
+    assert.equal(etld1('github.io'), 'github.io');
+  });
+
+  test('extractFacts: subdomains of same publisher count as ONE owner (corroboration not inflated)', async () => {
+    const NOW = new Date('2026-06-11T06:00:00.000Z');
+    const BODY = 'Anthropic released Claude 4 with 1 trillion parameters in June 2026. '
+      + 'The system achieved state-of-the-art performance on key benchmarks during evaluation.';
+    function makeSubdomainPair(subdomain: string, docId: string): { doc: FullSourceDocument; body: string } {
+      return {
+        doc: {
+          id: docId,
+          url: `https://${subdomain}/article`,
+          source: subdomain,
+          sourceDomain: subdomain,
+          tier: 'news',
+          title: 'Test',
+          publishedAt: '2026-06-11T00:00:00Z',
+          fetchedAt: NOW.toISOString(),
+          extraction: 'full',
+          accessPolicy: 'allowed',
+          wordCount: 30,
+          lang: 'en',
+          contentHash: docId.slice(0, 8),
+        },
+        body: BODY,
+      };
+    }
+    // Two different subdomains of the same publisher
+    const pairs = [
+      makeSubdomainPair('blog.techcrunch.com', 'a'.repeat(40)),
+      makeSubdomainPair('news.techcrunch.com', 'b'.repeat(40)),
+    ];
+    const result = await extractFacts(pairs, 'ai', 'cluster-23-sub', NOW);
+    for (const fact of result.facts) {
+      assert.equal(
+        fact.corroboration, 1,
+        `subdomains of the same publisher must yield corroboration=1, got ${fact.corroboration}`,
+      );
+    }
+  });
+
+  test('extractFacts: two distinct publishers → corroboration=2', async () => {
+    const NOW = new Date('2026-06-11T06:00:00.000Z');
+    const BODY = 'Google released Gemini 2.0 with significant improvements in June 2026. '
+      + 'The model outperformed competitors on 3 major benchmarks by large margins.';
+    function makeDistinctPair(domain: string, docId: string): { doc: FullSourceDocument; body: string } {
+      return {
+        doc: {
+          id: docId,
+          url: `https://${domain}/article`,
+          source: domain,
+          sourceDomain: domain,
+          tier: 'news',
+          title: 'Test',
+          publishedAt: '2026-06-11T00:00:00Z',
+          fetchedAt: NOW.toISOString(),
+          extraction: 'full',
+          accessPolicy: 'allowed',
+          wordCount: 30,
+          lang: 'en',
+          contentHash: docId.slice(0, 8),
+        },
+        body: BODY,
+      };
+    }
+    const pairs = [
+      makeDistinctPair('techcrunch.com', 'c'.repeat(40)),
+      makeDistinctPair('theverge.com', 'd'.repeat(40)),
+    ];
+    const result = await extractFacts(pairs, 'ai', 'cluster-23-two', NOW);
+    for (const fact of result.facts) {
+      assert.equal(fact.corroboration, 2, `two distinct publishers must yield corroboration=2, got ${fact.corroboration}`);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// contracts #2 — parseAggregationArtifact rejects malformed input
+// ---------------------------------------------------------------------------
+
+describe('contracts #2: parseAggregationArtifact at boundary', () => {
+  test('parseAggregationArtifact: accepts valid artifact from buildHermeticArtifact', async () => {
+    const { parseAggregationArtifact } = await import('@ardurai/contracts/zod');
+    const NOW = new Date('2026-06-11T06:00:00.000Z');
+    const artifact = buildHermeticArtifact(NOW, deriveRunId(NOW.toISOString()));
+    assert.doesNotThrow(() => parseAggregationArtifact(artifact));
+  });
+
+  test('parseAggregationArtifact: rejects missing schemaVersion', async () => {
+    const { parseAggregationArtifact } = await import('@ardurai/contracts/zod');
+    assert.throws(() => parseAggregationArtifact({ artifact: 'aggregation', data: {} }));
+  });
+
+  test('parseAggregationArtifact: rejects wrong artifact stage', async () => {
+    const { parseAggregationArtifact } = await import('@ardurai/contracts/zod');
+    assert.throws(() =>
+      parseAggregationArtifact({
+        schemaVersion: 'ardur-content-pipeline/v1',
+        artifact: 'ranking',
+        data: {},
+      }),
+    );
   });
 });

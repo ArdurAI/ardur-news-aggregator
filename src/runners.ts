@@ -25,6 +25,7 @@ import {
   CONTRACT_REVISION,
   type AggregationArtifact,
 } from '@ardurai/contracts';
+import { parseAggregationArtifact } from '@ardurai/contracts/zod';
 
 // ---------------------------------------------------------------------------
 // --describe: engine schema spec derived from @ardurai/contracts constants
@@ -416,6 +417,31 @@ async function main(): Promise<void> {
     }
     process.exitCode = 1;
     return;
+  }
+
+  // Contracts #2: Zod-validate the produced artifact before writing (fail-fast on schema regression).
+  try {
+    parseAggregationArtifact(artifact);
+  } catch (parseErr: unknown) {
+    if (args.jsonErrors) {
+      const envelope: StructuredErrorEnvelope = { error: classifyError(parseErr) };
+      process.stdout.write(JSON.stringify(envelope, null, 2) + '\n');
+    } else {
+      process.stderr.write(
+        `[ardur-news-aggregator] schema error: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}\n`,
+      );
+    }
+    process.exitCode = 1;
+    return;
+  }
+
+  // #22: A5 violations are fail-CLOSED — non-zero exit so CI catches copyright regressions.
+  const a5Violations = artifact.warnings.filter((w) => w.startsWith('[A5]'));
+  if (a5Violations.length > 0) {
+    process.stderr.write(
+      `[ardur-news-aggregator] ${a5Violations.length} A5 copyright violation(s) detected — exiting non-zero\n`,
+    );
+    process.exitCode = 1;
   }
 
   const json = JSON.stringify(artifact, null, 2) + '\n';
