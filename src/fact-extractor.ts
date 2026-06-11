@@ -11,12 +11,15 @@
  *   - No fact is emitted that is not grounded in a real source body.
  *   - The statement is original expression — not a copied sentence.
  *   - Quotes in provenance are validated to < 25 words by the copyright guard.
+ *   - Fact ids are content-derived (deterministic given the same inputs).
+ *   - Paywalled / ToS-restricted / robots-disallowed bodies are never mined.
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import type { SourceDocument, ExtractedFact, FactProvenance } from './contracts-v3.ts';
 import type { ProviderMeta, Confidence } from '@ardurai/contracts';
-import { validateFactsForWire, hasForbiddenVerbatimOverlap } from './copyright-guard.ts';
+import { validateFactsForWire, hasForbiddenVerbatimOverlap, wordCount } from './copyright-guard.ts';
+import { ExtractedFactSchema } from '@ardurai/contracts/zod';
 
 // ── Environment config ───────────────────────────────────────────────────────
 
@@ -50,6 +53,19 @@ interface RawFactFromLlm {
   };
   quote?: string;
   confidence?: string;
+}
+
+// ── Deterministic fact id ────────────────────────────────────────────────────
+
+/**
+ * Content-derived fact id: SHA-256(clusterId | statement | primaryDocId).
+ * Same inputs always produce the same id — no randomness, no wall-clock.
+ */
+function factIdFrom(clusterId: string, statement: string, primaryDocId: string): string {
+  return createHash('sha256')
+    .update(`${clusterId}|${statement}|${primaryDocId}`)
+    .digest('hex')
+    .slice(0, 32);
 }
 
 // ── Ollama client ────────────────────────────────────────────────────────────
@@ -142,8 +158,9 @@ async function extractWithLlm(
   pairs: SourceBodyPair[],
   topic: string,
   clusterId: string,
+  now: Date,
 ): Promise<{ facts: Omit<ExtractedFact, 'corroboration'>[]; providerMeta: ProviderMeta } | null> {
-  const generatedAt = new Date().toISOString();
+  const generatedAt = now.toISOString();
 
   // Batch: extract from each source independently, then cross-reference for corroboration
   const perSourceFacts: Map<string, RawFactFromLlm[]> = new Map();
@@ -197,7 +214,7 @@ async function extractWithLlm(
       };
 
       if (rawFact.quote) {
-        const qWords = rawFact.quote.trim().split(/\s+/).length;
+        const qWords = wordCount(rawFact.quote);
         if (qWords <= 25) {
           prov.quote = rawFact.quote;
         }
@@ -214,7 +231,7 @@ async function extractWithLlm(
           : 'medium';
 
       const fact: Omit<ExtractedFact, 'corroboration'> = {
-        id: randomUUID(),
+        id: factIdFrom(clusterId, rawFact.statement, docId),
         topic,
         clusterId,
         statement: rawFact.statement,
@@ -253,8 +270,9 @@ function deterministicExtract(
   body: string,
   topic: string,
   clusterId: string,
+  now: Date,
 ): ExtractedFact[] {
-  const generatedAt = new Date().toISOString();
+  const generatedAt = now.toISOString();
   const providerMeta: ProviderMeta = {
     provider: 'deterministic',
     model: 'regex-v1',
@@ -280,8 +298,8 @@ function deterministicExtract(
     if (entities.size === 0 && numbers.length === 0) continue;
 
     // Truncate sentence to avoid verbatim reproduction (hard limit: 40 words)
-    const words = sentence.trim().split(/\s+/);
-    if (words.length > 40) continue; // too long — skip to avoid near-verbatim
+    const tokens = sentence.trim().match(/\S+/g) ?? [];
+    if (tokens.length > 40) continue; // too long — skip to avoid near-verbatim
 
     const statement = sentence.trim();
     if (hasForbiddenVerbatimOverlap(statement, body)) continue;
@@ -293,7 +311,7 @@ function deterministicExtract(
     };
 
     const fact: ExtractedFact = {
-      id: randomUUID(),
+      id: factIdFrom(clusterId, statement, doc.id),
       topic,
       clusterId,
       statement,
@@ -318,26 +336,48 @@ function deterministicExtract(
 // ── Corroboration merging ────────────────────────────────────────────────────
 
 /**
- * For each fact, compute corroboration = count of distinct source domains that
- * have a fact in the same cluster (rough entity-overlap matching).
+ * For each fact, corroboration = number of DISTINCT source owners (domains) across
+ * all docs in the cluster that contributed any content. This reflects cluster-level
+ * corroboration so that facts from a well-sourced cluster score higher than
+ * single-source facts.
+ *
+ * Coordination note: ardur-ranking-engine #15 expects this definition — do not
+ * change the owner-dedup logic without updating the ranking engine in lockstep.
  */
 function computeCorroboration(
   facts: Omit<ExtractedFact, 'corroboration'>[],
   allDocsInCluster: SourceDocument[],
 ): ExtractedFact[] {
   const allDomains = new Set(allDocsInCluster.map((d) => d.sourceDomain));
+  const clusterCorroboration = Math.max(allDomains.size, 1);
 
   return facts.map((fact) => {
-    // Simple heuristic: corroboration = number of distinct domains in the cluster
-    // that mention any of the fact's entities. For LLM-extracted facts, we use
-    // the count of distinct provenance domains.
-    const provenanceDomains = new Set(fact.provenance.map((p) => p.sourceDomain));
-    const corroboration = Math.max(provenanceDomains.size, 1);
     const confidence: Confidence =
-      corroboration >= 2 ? (fact.confidence === 'high' ? 'high' : 'medium') : 'low';
-
-    return { ...fact, corroboration, confidence };
+      clusterCorroboration >= 2 ? (fact.confidence === 'high' ? 'high' : 'medium') : 'low';
+    return { ...fact, corroboration: clusterCorroboration, confidence };
   });
+}
+
+// ── Zod validation helper ─────────────────────────────────────────────────────
+
+/**
+ * Run each ExtractedFact through the shared Tier-2 Zod schema.
+ * Invalid facts are dropped with a warning (defensive — production LLM outputs
+ * can be structurally surprising).
+ */
+function zodValidateFacts(facts: ExtractedFact[], warnings: string[]): ExtractedFact[] {
+  const valid: ExtractedFact[] = [];
+  for (const fact of facts) {
+    const result = ExtractedFactSchema.safeParse(fact);
+    if (result.success) {
+      valid.push(result.data as ExtractedFact);
+    } else {
+      warnings.push(
+        `fact ${fact.id}: Zod validation failed — dropped: ${result.error.issues.map((i) => i.message).join('; ')}`,
+      );
+    }
+  }
+  return valid;
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -347,11 +387,17 @@ function computeCorroboration(
  * Tries Ollama first; falls back to deterministic extraction.
  * All returned facts have provenance.length >= 1.
  * Wire safety is validated by copyright-guard before returning.
+ *
+ * @param pairs     Source body pairs (already filtered to 'allowed' accessPolicy).
+ * @param topic     Topic id.
+ * @param clusterId Cluster id.
+ * @param now       Pinned wall-clock for deterministic generatedAt timestamps.
  */
 export async function extractFacts(
   pairs: SourceBodyPair[],
   topic: string,
   clusterId: string,
+  now: Date,
 ): Promise<FactExtractionResult> {
   const warnings: string[] = [];
   const activePairs = pairs.filter((p) => p.body && p.body.length >= 100);
@@ -364,14 +410,14 @@ export async function extractFacts(
         model: 'regex-v1',
         status: 'fallback',
         reason: 'no extractable bodies in cluster',
-        generatedAt: new Date().toISOString(),
+        generatedAt: now.toISOString(),
       },
       warnings: ['no extractable bodies in cluster — 0 facts'],
     };
   }
 
   // Try AI-primary
-  const llmResult = await extractWithLlm(activePairs, topic, clusterId);
+  const llmResult = await extractWithLlm(activePairs, topic, clusterId, now);
 
   let rawFacts: Omit<ExtractedFact, 'corroboration'>[];
   let provider: ProviderMeta;
@@ -389,7 +435,7 @@ export async function extractFacts(
 
     const detFacts: ExtractedFact[] = [];
     for (const pair of activePairs) {
-      detFacts.push(...deterministicExtract(pair.doc, pair.body, topic, clusterId));
+      detFacts.push(...deterministicExtract(pair.doc, pair.body, topic, clusterId, now));
     }
 
     // Deterministic facts already have corroboration=1; re-compute after merging
@@ -398,7 +444,8 @@ export async function extractFacts(
       detFacts.map(({ corroboration: _c, ...rest }) => rest),
       allDocs,
     );
-    const { facts: validated, violations } = validateFactsForWire(withCorroboration);
+    const zodValid = zodValidateFacts(withCorroboration, warnings);
+    const { facts: validated, violations } = validateFactsForWire(zodValid);
     warnings.push(...violations);
 
     return {
@@ -408,7 +455,7 @@ export async function extractFacts(
         model: 'regex-v1',
         status: 'fallback',
         reason: llmResult === null ? 'ollama-unavailable' : 'llm-returned-empty',
-        generatedAt: new Date().toISOString(),
+        generatedAt: now.toISOString(),
       },
       warnings,
     };
@@ -416,7 +463,8 @@ export async function extractFacts(
 
   const allDocs = activePairs.map((p) => p.doc);
   const withCorroboration = computeCorroboration(rawFacts, allDocs);
-  const { facts: validated, violations } = validateFactsForWire(withCorroboration);
+  const zodValid = zodValidateFacts(withCorroboration, warnings);
+  const { facts: validated, violations } = validateFactsForWire(zodValid);
   warnings.push(...violations);
 
   return { facts: validated, provider, warnings };

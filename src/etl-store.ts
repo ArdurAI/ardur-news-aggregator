@@ -102,7 +102,15 @@ function appendHashIndex(hash: string, id: string): void {
   hashIndexCache.set(hash, id);
 }
 
+/** All doc ids are SHA-256 hex[:40] from docIdFromUrl. Reject anything else (CWE-22). */
+function assertSafeDocId(id: string, location: string): void {
+  if (!/^[0-9a-f]{40}$/.test(id)) {
+    throw new Error(`etl-store: invalid doc id at ${location}: "${id.slice(0, 80)}"`);
+  }
+}
+
 function readStoredDoc(id: string): StoredDoc | null {
+  assertSafeDocId(id, 'readStoredDoc');
   const path = join(DOCS_DIR, `${id}.json`);
   if (!existsSync(path)) return null;
   try {
@@ -121,17 +129,20 @@ export const fileEtlStore: EtlStore = {
   },
 
   async getById(id: string): Promise<SourceDocument | null> {
+    assertSafeDocId(id, 'getById');
     const stored = readStoredDoc(id);
     return stored?.doc ?? null;
   },
 
   async getBody(sourceDocId: string): Promise<string | null> {
+    assertSafeDocId(sourceDocId, 'getBody');
     const path = join(BODIES_DIR, `${sourceDocId}.txt`);
     if (!existsSync(path)) return null;
     return readFileSync(path, 'utf8');
   },
 
   async put(doc: SourceDocument, body: string | null, opts: PutOpts = {}): Promise<void> {
+    assertSafeDocId(doc.id, 'put');
     ensureDirs();
     loadHashIndex();
 

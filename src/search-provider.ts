@@ -10,7 +10,7 @@
  */
 
 import { XMLParser } from 'fast-xml-parser';
-import { assertAllowedFetchUrl, readBoundedText, GOOGLE_NEWS_FETCH_HOSTS } from './source-safety.ts';
+import { assertAllowedFetchUrl, readBoundedText, normalizePublicUrl, GOOGLE_NEWS_FETCH_HOSTS } from './source-safety.ts';
 import type { SourceTier } from '@ardurai/contracts';
 
 const SEARCH_USER_AGENT = 'ArdurAI/1.0 (+https://ardur.ai)';
@@ -126,15 +126,19 @@ export class GoogleNewsSearchProvider implements SearchProvider {
 
         if (!rawUrl) continue;
 
+        // Normalize through SSRF guard before surfacing to callers (#20)
+        const normalizedUrl = normalizePublicUrl(rawUrl, { allowHttp: true });
+        if (!normalizedUrl) continue;
+
         let domain = '';
         try {
-          domain = new URL(rawUrl).hostname.replace(/^www\./, '');
+          domain = new URL(normalizedUrl).hostname.replace(/^www\./, '');
         } catch {
           continue;
         }
 
         const result: SearchResult = {
-          url: rawUrl,
+          url: normalizedUrl,
           title: stripMarkup(rawTitle),
           domain,
         };

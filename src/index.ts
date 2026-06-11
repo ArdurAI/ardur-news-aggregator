@@ -41,6 +41,7 @@ import { captureInteractionMetrics } from './interaction.ts';
 import { defaultSearchProviders, searchAllProviders } from './search-provider.ts';
 import { fileEtlStore, docIdFromUrl } from './etl-store.ts';
 import { fetchArticle } from './content-extract.ts';
+import { normalizePublicUrl } from './source-safety.ts';
 import { extractFacts } from './fact-extractor.ts';
 import { validateFactsForWire } from './copyright-guard.ts';
 import type { RawItem } from './ingest.ts';
@@ -120,6 +121,7 @@ async function runEtlForTopic(
   opts: {
     fetchBudget: number;
     fetchTimeoutMs: number;
+    now: Date;
   },
 ): Promise<{
   documents: SourceDocument[];
@@ -210,9 +212,10 @@ async function runEtlForTopic(
     await Promise.all(fetchPromises);
     documents.push(...clusterDocs);
 
-    // A4: Extract facts from the bodies in this cluster
+    // A4: Extract facts — paywalled / ToS-restricted / robots-disallowed bodies must NOT
+    // be mined into facts (#17). Only 'allowed' docs with real body text are eligible.
     const pairs = clusterDocs
-      .filter((doc) => doc.extraction !== 'failed')
+      .filter((doc) => doc.extraction !== 'failed' && doc.accessPolicy === 'allowed')
       .map((doc) => ({ doc, body: bodies.get(doc.id) ?? '' }))
       .filter((p) => p.body.length >= 100);
 
@@ -224,11 +227,17 @@ async function runEtlForTopic(
       continue;
     }
 
-    const { facts, warnings: factWarnings } = await extractFacts(pairs, topicId, cluster.clusterId);
+    const { facts, warnings: factWarnings } = await extractFacts(
+      pairs,
+      topicId,
+      cluster.clusterId,
+      opts.now,
+    );
     warnings.push(...factWarnings.map((w) => `[${topicId}/${cluster.clusterId}] ${w}`));
 
-    // A5: Final copyright gate before placing facts on the wire artifact
-    const { facts: wireFacts, violations } = validateFactsForWire(facts);
+    // A5: Final copyright gate — pass bodyMap so the gate can re-screen statements (#16).
+    const bodyMap = new Map(pairs.map((p) => [p.doc.id, p.body]));
+    const { facts: wireFacts, violations } = validateFactsForWire(facts, bodyMap);
     warnings.push(...violations.map((v) => `[A5] ${v}`));
 
     factsByCluster[cluster.clusterId] = wireFacts;
@@ -304,8 +313,11 @@ export async function runAggregation(options: AggregationOptions = {}): Promise<
 
       const existingUrls = new Set(allItems.map((i) => i.url));
       for (const result of searchResults) {
-        if (!result.url || existingUrls.has(result.url)) continue;
-        existingUrls.add(result.url);
+        if (!result.url) continue;
+        // Route search-discovery URLs through normalizePublicUrl (#20) before use.
+        const safeUrl = normalizePublicUrl(result.url, { allowHttp: true });
+        if (!safeUrl || existingUrls.has(safeUrl)) continue;
+        existingUrls.add(safeUrl);
         // Discovery results become thin RawItems (no full body yet — ETL handles that)
         const classification = catalogDomains.has(result.domain)
           ? { tier: 'news' as const, credibilityHint: 0.65 }
@@ -317,7 +329,7 @@ export async function runAggregation(options: AggregationOptions = {}): Promise<
           source: result.sourceLabel ?? result.domain,
           sourceDomain: result.domain,
           sourceUrl: '',
-          url: result.url,
+          url: safeUrl,
           tier: classification.tier,
           publishedAt: result.publishedAt ?? now.toISOString(),
           summaryHint: '',
@@ -403,7 +415,7 @@ export async function runAggregation(options: AggregationOptions = {}): Promise<
         topic.id,
         finalItems,
         clusters,
-        { fetchBudget: etlFetchBudgetPerTopic, fetchTimeoutMs: perSourceTimeoutMs },
+        { fetchBudget: etlFetchBudgetPerTopic, fetchTimeoutMs: perSourceTimeoutMs, now },
       );
 
       warnings.push(...etlWarnings);

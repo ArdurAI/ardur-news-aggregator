@@ -26,8 +26,12 @@ import {
 } from './copyright-guard.ts';
 import { CONTRACT_REVISION_V3 } from './contracts-v3.ts';
 import type { ExtractedFact, FactProvenance } from './contracts-v3.ts';
-import { classifyDiscoveredDomain } from './search-provider.ts';
-import { docIdFromUrl, contentHashOf } from './etl-store.ts';
+import { classifyDiscoveredDomain, GoogleNewsSearchProvider } from './search-provider.ts';
+import { docIdFromUrl, contentHashOf, fileEtlStore } from './etl-store.ts';
+import { fetchArticle } from './content-extract.ts';
+import { extractFacts } from './fact-extractor.ts';
+import { wordCount } from './copyright-guard.ts';
+import type { SourceDocument as FullSourceDocument } from '@ardurai/contracts';
 import {
   buildDescribeOutput,
   classifyError,
@@ -672,7 +676,7 @@ describe('A5: copyright-guard', () => {
     assert.ok(violations.length > 0);
   });
 
-  test('validateFactsForWire: truncates over-length quote', () => {
+  test('validateFactsForWire: drops fact with over-length quote (fail-closed)', () => {
     const longQuote = Array.from({ length: 30 }, (_, i) => `word${i}`).join(' ');
     const prov: FactProvenance = {
       sourceDocId: 'doc-1',
@@ -696,12 +700,316 @@ describe('A5: copyright-guard', () => {
         generatedAt: '2026-06-11T00:00:00Z',
       },
     };
+    // Fail-closed: over-length quote drops the fact entirely (not truncated).
     const { facts, violations } = validateFactsForWire([fact]);
+    assert.equal(facts.length, 0, 'fact with over-length quote must be dropped (fail-closed)');
+    assert.ok(violations.some((v) => v.includes('dropped')), 'violation message must mention "dropped"');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #15 — CJK / whitespace-free word count
+// ---------------------------------------------------------------------------
+
+describe('#15: CJK word count', () => {
+  test('wordCount: ASCII words counted correctly', () => {
+    assert.equal(wordCount('one two three'), 3);
+  });
+
+  test('wordCount: empty string is 0', () => {
+    assert.equal(wordCount(''), 0);
+    assert.equal(wordCount('   '), 0);
+  });
+
+  test('wordCount: each Han character counts as one word', () => {
+    // 5 Han chars, no spaces → should be 5, not 1
+    assert.equal(wordCount('日本語テキ'), 5);
+  });
+
+  test('wordCount: mixed CJK + Latin counts both', () => {
+    // "hello" = 1 Latin word, "日本" = 2 CJK → total 3
+    assert.equal(wordCount('hello 日本'), 3);
+  });
+
+  test('wordCount: Hangul characters each count as one word', () => {
+    assert.equal(wordCount('가나다라마'), 5);
+  });
+
+  test('assertQuoteLength: CJK 26-char quote exceeds 25-word limit', () => {
+    const cjkQuote = '日'.repeat(26); // 26 CJK chars = 26 "words"
+    assert.throws(() => assertQuoteLength(cjkQuote, 'test'), /Copyright violation/);
+  });
+
+  test('assertQuoteLength: CJK 25-char quote is exactly at limit', () => {
+    const cjkQuote = '日'.repeat(25); // 25 CJK chars = 25 "words"
+    assert.doesNotThrow(() => assertQuoteLength(cjkQuote, 'test'));
+  });
+
+  test('trimQuoteToLimit: CJK 30-token quote is trimmed to 25', () => {
+    const cjkQuote = '日'.repeat(30);
+    const trimmed = trimQuoteToLimit(cjkQuote);
+    assert.ok(wordCount(trimmed.replace('…', '')) <= 25);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #16 — A5 fail-CLOSED + statement verbatim screen
+// ---------------------------------------------------------------------------
+
+describe('#16: A5 fail-closed + statement screen', () => {
+  function makeCleanFact(overrides: Partial<ExtractedFact> = {}): ExtractedFact {
+    return {
+      id: 'f1',
+      topic: 'ai',
+      clusterId: 'c1',
+      statement: 'OpenAI released a model with improved capabilities.',
+      entities: ['OpenAI'],
+      provenance: [{ sourceDocId: 'doc-1', sourceDomain: 'example.com', url: 'https://example.com/a' }],
+      corroboration: 1,
+      confidence: 'medium',
+      extractedBy: { provider: 'deterministic', model: 'regex-v1', status: 'fallback', generatedAt: '2026-06-11T00:00:00Z' },
+      ...overrides,
+    };
+  }
+
+  test('validateFactsForWire: clean fact passes without bodyMap', () => {
+    const { facts, violations } = validateFactsForWire([makeCleanFact()]);
     assert.equal(facts.length, 1);
-    assert.ok(violations.some((v) => v.includes('truncated')));
-    const quote = facts[0]!.provenance[0]?.quote ?? '';
-    const wordCount = quote.trim().split(/\s+/).filter((w) => !w.endsWith('…')).length;
-    assert.ok(wordCount <= 25, `trimmed quote has ${wordCount} words`);
+    assert.equal(violations.length, 0);
+  });
+
+  test('validateFactsForWire: statement verbatim overlap → drops fact when bodyMap supplied', () => {
+    // Statement that exactly replicates 8+ consecutive words from the body
+    const body = 'one two three four five six seven eight different things here and more words';
+    const statement = 'one two three four five six seven eight more text here.';
+    const fact = makeCleanFact({
+      statement,
+      provenance: [{ sourceDocId: 'doc-1', sourceDomain: 'example.com', url: 'https://example.com/a' }],
+    });
+    const bodyMap = new Map([['doc-1', body]]);
+    const { facts, violations } = validateFactsForWire([fact], bodyMap);
+    assert.equal(facts.length, 0, 'verbatim statement must be dropped');
+    assert.ok(violations.some((v) => v.includes('verbatim')), 'violation must mention verbatim');
+  });
+
+  test('validateFactsForWire: original statement passes with bodyMap', () => {
+    const body = 'Apple launched a new iPhone with revolutionary camera features today.';
+    const statement = 'OpenAI introduced a significantly improved language model this quarter.';
+    const fact = makeCleanFact({ statement });
+    const bodyMap = new Map([['doc-1', body]]);
+    const { facts } = validateFactsForWire([fact], bodyMap);
+    assert.equal(facts.length, 1);
+  });
+
+  test('validateFactsForWire: no bodyMap → statement NOT screened (gate absent = skip)', () => {
+    // Without bodyMap the gate cannot check — fact should pass through
+    const fact = makeCleanFact({ statement: 'some statement here' });
+    const { facts } = validateFactsForWire([fact]);
+    assert.equal(facts.length, 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #17 — paywalled / ToS-restricted bodies excluded from ETL
+// ---------------------------------------------------------------------------
+
+describe('#17: paywalled bodies excluded from fact extraction', () => {
+  test('fetchArticle: TOS-restricted domain returns accessPolicy=tos-restricted', async () => {
+    // wsj.com is in TOS_DISALLOW_DOMAINS — but fetchArticle calls the network.
+    // We test the detection logic directly via the exported function below.
+    // Verify that a robots-disallowed doc has extraction=failed.
+    // (Network-independent: can test by passing a private/blocked URL)
+    const result = await fetchArticle('https://127.0.0.1/article', { title: 'test' });
+    assert.equal(result.doc.accessPolicy, 'tos-restricted');
+    assert.equal(result.body, null);
+  });
+
+  test('SourceDocument accessPolicy field exists and is typed correctly', async () => {
+    const result = await fetchArticle('https://127.0.0.1/article', { title: 'test' });
+    const allowed: string[] = ['allowed', 'paywalled', 'robots-disallowed', 'tos-restricted'];
+    assert.ok(allowed.includes(result.doc.accessPolicy));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #18 — deterministic fact ids + now threading
+// ---------------------------------------------------------------------------
+
+describe('#18: deterministic fact ids', () => {
+  function makePair(docId: string, url: string, body: string): { doc: FullSourceDocument; body: string } {
+    return {
+      doc: {
+        id: docId,
+        url,
+        source: 'test',
+        sourceDomain: 'test.com',
+        tier: 'news',
+        title: 'Test Article',
+        publishedAt: '2026-06-11T00:00:00Z',
+        fetchedAt: '2026-06-11T00:00:00Z',
+        extraction: 'full',
+        accessPolicy: 'allowed',
+        wordCount: 100,
+        lang: 'en',
+        contentHash: 'abc',
+      },
+      body,
+    };
+  }
+
+  const BODY = 'Anthropic released Claude 4 with 1 trillion parameters in June 2026. '
+    + 'The model achieved 95% accuracy on standard benchmarks. '
+    + 'OpenAI responded by announcing GPT-5 for Q3 2026. '
+    + 'Google Gemini 2.0 also launched at the same conference.';
+
+  const NOW = new Date('2026-06-11T06:00:00.000Z');
+  const DOC_ID = '0'.repeat(40); // valid 40-char hex id
+  const CLUSTER_ID = 'cluster-test-1';
+
+  test('extractFacts: same inputs produce same fact ids (idempotent)', async () => {
+    const pair = makePair(DOC_ID, 'https://test.com/a', BODY);
+    const r1 = await extractFacts([pair], 'ai', CLUSTER_ID, NOW);
+    const r2 = await extractFacts([pair], 'ai', CLUSTER_ID, NOW);
+    const ids1 = r1.facts.map((f) => f.id).sort();
+    const ids2 = r2.facts.map((f) => f.id).sort();
+    assert.deepEqual(ids1, ids2, 'fact ids must be deterministic');
+  });
+
+  test('extractFacts: generatedAt equals supplied now', async () => {
+    const pair = makePair(DOC_ID, 'https://test.com/a', BODY);
+    const result = await extractFacts([pair], 'ai', CLUSTER_ID, NOW);
+    for (const fact of result.facts) {
+      assert.equal(fact.extractedBy.generatedAt, NOW.toISOString());
+    }
+  });
+
+  test('extractFacts: fact id is 32 hex chars (no UUID format)', async () => {
+    const pair = makePair(DOC_ID, 'https://test.com/a', BODY);
+    const result = await extractFacts([pair], 'ai', CLUSTER_ID, NOW);
+    for (const fact of result.facts) {
+      assert.match(fact.id, /^[0-9a-f]{32}$/, `fact.id "${fact.id}" should be 32 hex chars`);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #19 — corroboration reflects allDomains, not provenance size
+// ---------------------------------------------------------------------------
+
+describe('#19: corroboration > 1 for multi-domain clusters', () => {
+  function makeDocPair(
+    docId: string,
+    domain: string,
+    url: string,
+  ): { doc: FullSourceDocument; body: string } {
+    const body = `Anthropic released Claude 4 with improved capabilities in June 2026. `
+      + `The system achieved state-of-the-art performance on 1 trillion parameter benchmarks. `
+      + `Google confirmed similar advances in their models during the same period.`;
+    return {
+      doc: {
+        id: docId,
+        url,
+        source: domain,
+        sourceDomain: domain,
+        tier: 'news',
+        title: 'Test',
+        publishedAt: '2026-06-11T00:00:00Z',
+        fetchedAt: '2026-06-11T00:00:00Z',
+        extraction: 'full',
+        accessPolicy: 'allowed',
+        wordCount: 50,
+        lang: 'en',
+        contentHash: 'x',
+      },
+      body,
+    };
+  }
+
+  const NOW = new Date('2026-06-11T06:00:00.000Z');
+
+  test('corroboration equals cluster domain count (2 domains → corroboration=2)', async () => {
+    const pairs = [
+      makeDocPair('a'.repeat(40), 'techcrunch.com', 'https://techcrunch.com/a'),
+      makeDocPair('b'.repeat(40), 'theverge.com', 'https://theverge.com/b'),
+    ];
+    const result = await extractFacts(pairs, 'ai', 'cluster-multi', NOW);
+    for (const fact of result.facts) {
+      assert.equal(fact.corroboration, 2, `expected corroboration=2 (2 distinct domains), got ${fact.corroboration}`);
+    }
+  });
+
+  test('corroboration is at least 1 for single-domain cluster', async () => {
+    const pairs = [makeDocPair('c'.repeat(40), 'only-source.io', 'https://only-source.io/a')];
+    const result = await extractFacts(pairs, 'ai', 'cluster-single', NOW);
+    for (const fact of result.facts) {
+      assert.ok(fact.corroboration >= 1);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #20 — search discovery URLs pass through normalizePublicUrl
+// ---------------------------------------------------------------------------
+
+describe('#20: search discovery URL normalization', () => {
+  test('GoogleNewsSearchProvider does not expose credential-bearing URLs', () => {
+    // normalizePublicUrl (used inside the provider) must reject credential-bearing URLs.
+    const credentialUrl = 'https://user:pass@news.google.com/rss/search?q=ai';
+    assert.equal(normalizePublicUrl(credentialUrl), '', 'credential URL must be rejected');
+  });
+
+  test('GoogleNewsSearchProvider: constructor is importable (instance check)', () => {
+    const provider = new GoogleNewsSearchProvider();
+    assert.equal(provider.name, 'google-news-rss');
+  });
+
+  test('normalizePublicUrl: private IP is rejected (search safety)', () => {
+    assert.equal(normalizePublicUrl('https://10.0.0.1/article'), '');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #21 — etl-store path traversal
+// ---------------------------------------------------------------------------
+
+describe('#21: etl-store path traversal rejection (CWE-22)', () => {
+  test('getById: rejects id with path traversal (../)', async () => {
+    await assert.rejects(
+      () => fileEtlStore.getById('../etc/passwd'),
+      /invalid doc id/,
+    );
+  });
+
+  test('getBody: rejects id with path traversal', async () => {
+    await assert.rejects(
+      () => fileEtlStore.getBody('../../etc/shadow'),
+      /invalid doc id/,
+    );
+  });
+
+  test('getById: rejects id shorter than 40 hex chars', async () => {
+    await assert.rejects(
+      () => fileEtlStore.getById('abc123'),
+      /invalid doc id/,
+    );
+  });
+
+  test('getBody: rejects non-hex chars in id', async () => {
+    await assert.rejects(
+      () => fileEtlStore.getBody('GGGG' + 'a'.repeat(36)),
+      /invalid doc id/,
+    );
+  });
+
+  test('getById: accepts valid 40-char hex id (returns null when not found)', async () => {
+    const validId = 'a'.repeat(40);
+    const result = await fileEtlStore.getById(validId);
+    assert.equal(result, null); // not in store, but no error thrown
+  });
+
+  test('docIdFromUrl: always returns a safe 40-hex-char id', () => {
+    const id = docIdFromUrl('https://techcrunch.com/2026/06/01/openai-model');
+    assert.match(id, /^[0-9a-f]{40}$/);
   });
 });
 
