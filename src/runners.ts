@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * runners.ts — Uniform agent-readiness CLI entry point for ardur-news-aggregator.
  *
