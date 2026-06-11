@@ -22,7 +22,8 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test --experimental-strip-types src/smoke.test.ts",
-    "aggregate": "node --experimental-strip-types src/cli.ts"
+    "aggregate": "node --experimental-strip-types src/cli.ts",
+    "produce-golden": "node --experimental-strip-types src/cli.ts --out data/golden-sample.json --max-age-hours 168 --timeout 12000 --concurrency 12"
   },
   "keywords": [
     "ardur",

@@ -6,7 +6,7 @@
 
 import { XMLParser } from 'fast-xml-parser';
 import type { SourceTier } from './contracts.ts';
-import type { SourceDefinition, TopicDefinition } from './sources.ts';
+import type { SourceDefinition, TopicDefinition } from './source-types.ts';
 import {
   assertAllowedFetchUrl,
   readBoundedText,
