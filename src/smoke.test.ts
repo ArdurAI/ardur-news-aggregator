@@ -17,6 +17,17 @@ import { clusterItems } from './cluster.ts';
 import { isForbiddenMetricKey, captureInteractionMetrics } from './interaction.ts';
 import type { AggregatedItem } from '@ardurai/contracts';
 import type { RawItem } from './ingest.ts';
+import {
+  assertQuoteLength,
+  trimQuoteToLimit,
+  hasForbiddenVerbatimOverlap,
+  validateFactsForWire,
+  MAX_QUOTE_WORDS,
+} from './copyright-guard.ts';
+import { CONTRACT_REVISION_V3 } from './contracts-v3.ts';
+import type { ExtractedFact, FactProvenance } from './contracts-v3.ts';
+import { classifyDiscoveredDomain } from './search-provider.ts';
+import { docIdFromUrl, contentHashOf } from './etl-store.ts';
 
 // ---------------------------------------------------------------------------
 // Contracts
@@ -480,4 +491,208 @@ describe('index (offline)', () => {
 
   // Network-dependent test: skip to avoid flaky CI
   // TODO: wire a mock fetch for full runAggregation integration test
+});
+
+// ---------------------------------------------------------------------------
+// A1: No source ceiling — confirm export + type shape
+// ---------------------------------------------------------------------------
+
+describe('A1: uncapped ingestion', () => {
+  test('CONTRACT_REVISION_V3 is 3', () => {
+    assert.equal(CONTRACT_REVISION_V3, 3);
+  });
+
+  test('rev-2 CONTRACT_REVISION is still 2 (baseline unchanged)', () => {
+    assert.equal(CONTRACT_REVISION, 2);
+  });
+
+  test('index re-exports CONTRACT_REVISION_V3', async () => {
+    const mod = await import('./index.ts');
+    assert.equal((mod as { CONTRACT_REVISION_V3?: unknown }).CONTRACT_REVISION_V3, 3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A2: Search provider
+// ---------------------------------------------------------------------------
+
+describe('A2: search-provider', () => {
+  test('classifyDiscoveredDomain: known primary domain', () => {
+    const { tier, credibilityHint } = classifyDiscoveredDomain('openai.com');
+    assert.equal(tier, 'primary');
+    assert.ok(credibilityHint >= 0.9);
+  });
+
+  test('classifyDiscoveredDomain: known paper domain', () => {
+    const { tier } = classifyDiscoveredDomain('arxiv.org');
+    assert.equal(tier, 'paper');
+  });
+
+  test('classifyDiscoveredDomain: unknown domain defaults to news tier', () => {
+    const { tier, credibilityHint } = classifyDiscoveredDomain('some-unknown-blog.io');
+    assert.equal(tier, 'news');
+    assert.ok(credibilityHint <= 0.65);
+  });
+
+  test('classifyDiscoveredDomain: known technical-news domain', () => {
+    const { tier } = classifyDiscoveredDomain('infoq.com');
+    assert.equal(tier, 'technical-news');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A3: ETL store helpers
+// ---------------------------------------------------------------------------
+
+describe('A3: etl-store helpers', () => {
+  test('docIdFromUrl: same URL → same id', () => {
+    const url = 'https://techcrunch.com/2026/06/01/openai-new-model';
+    assert.equal(docIdFromUrl(url), docIdFromUrl(url));
+  });
+
+  test('docIdFromUrl: different URLs → different ids', () => {
+    const a = docIdFromUrl('https://techcrunch.com/a');
+    const b = docIdFromUrl('https://theverge.com/b');
+    assert.notEqual(a, b);
+  });
+
+  test('contentHashOf: same text → same hash', () => {
+    const text = 'OpenAI released a new model today.';
+    assert.equal(contentHashOf(text), contentHashOf(text));
+  });
+
+  test('contentHashOf: different text → different hash', () => {
+    assert.notEqual(contentHashOf('foo'), contentHashOf('bar'));
+  });
+
+  test('contentHashOf: empty string → valid hex hash', () => {
+    const hash = contentHashOf('');
+    assert.match(hash, /^[0-9a-f]+$/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A5: Copyright guard
+// ---------------------------------------------------------------------------
+
+describe('A5: copyright-guard', () => {
+  test('MAX_QUOTE_WORDS is 25', () => {
+    assert.equal(MAX_QUOTE_WORDS, 25);
+  });
+
+  test('assertQuoteLength: accepts quote under 25 words', () => {
+    const short = 'This is a short quote under the word limit.';
+    assert.doesNotThrow(() => assertQuoteLength(short, 'test'));
+  });
+
+  test('assertQuoteLength: throws on quote exceeding 25 words', () => {
+    const long = Array.from({ length: 26 }, (_, i) => `word${i}`).join(' ');
+    assert.throws(() => assertQuoteLength(long, 'test'), /Copyright violation/);
+  });
+
+  test('trimQuoteToLimit: truncates to 25 words', () => {
+    const words = Array.from({ length: 30 }, (_, i) => `word${i}`);
+    const trimmed = trimQuoteToLimit(words.join(' '));
+    const resultWords = trimmed.trim().split(/\s+/).filter((w) => !w.endsWith('…'));
+    assert.ok(resultWords.length <= 25);
+  });
+
+  test('trimQuoteToLimit: short quote unchanged', () => {
+    const short = 'This is fine.';
+    assert.equal(trimQuoteToLimit(short), short);
+  });
+
+  test('hasForbiddenVerbatimOverlap: detects 8-gram match', () => {
+    const sentence = 'one two three four five six seven eight more text here.';
+    const body = 'The article said one two three four five six seven eight different things.';
+    assert.ok(hasForbiddenVerbatimOverlap(sentence, body));
+  });
+
+  test('hasForbiddenVerbatimOverlap: no overlap for original expression', () => {
+    const statement = 'OpenAI introduced a significantly improved language model this quarter.';
+    const body = 'Apple launched a new iPhone with revolutionary camera features today.';
+    assert.ok(!hasForbiddenVerbatimOverlap(statement, body));
+  });
+
+  test('validateFactsForWire: passes clean fact', () => {
+    const fact: ExtractedFact = {
+      id: 'test-1',
+      topic: 'ai',
+      clusterId: 'c1',
+      statement: 'OpenAI released a new model with improved capabilities.',
+      entities: ['OpenAI'],
+      provenance: [
+        {
+          sourceDocId: 'doc-1',
+          sourceDomain: 'techcrunch.com',
+          url: 'https://techcrunch.com/2026/06/01/openai',
+        },
+      ],
+      corroboration: 1,
+      confidence: 'medium',
+      extractedBy: {
+        provider: 'deterministic',
+        model: 'regex-v1',
+        status: 'fallback',
+        generatedAt: '2026-06-11T00:00:00Z',
+      },
+    };
+    const { facts, violations } = validateFactsForWire([fact]);
+    assert.equal(facts.length, 1);
+    assert.equal(violations.length, 0);
+  });
+
+  test('validateFactsForWire: drops fact with empty provenance', () => {
+    const fact: ExtractedFact = {
+      id: 'test-2',
+      topic: 'ai',
+      clusterId: 'c1',
+      statement: 'A fact with no provenance.',
+      entities: [],
+      provenance: [],
+      corroboration: 0,
+      confidence: 'low',
+      extractedBy: {
+        provider: 'deterministic',
+        model: 'regex-v1',
+        status: 'fallback',
+        generatedAt: '2026-06-11T00:00:00Z',
+      },
+    };
+    const { facts, violations } = validateFactsForWire([fact]);
+    assert.equal(facts.length, 0);
+    assert.ok(violations.length > 0);
+  });
+
+  test('validateFactsForWire: truncates over-length quote', () => {
+    const longQuote = Array.from({ length: 30 }, (_, i) => `word${i}`).join(' ');
+    const prov: FactProvenance = {
+      sourceDocId: 'doc-1',
+      sourceDomain: 'example.com',
+      url: 'https://example.com/article',
+      quote: longQuote,
+    };
+    const fact: ExtractedFact = {
+      id: 'test-3',
+      topic: 'ai',
+      clusterId: 'c1',
+      statement: 'OpenAI launched something new.',
+      entities: ['OpenAI'],
+      provenance: [prov],
+      corroboration: 1,
+      confidence: 'low',
+      extractedBy: {
+        provider: 'deterministic',
+        model: 'regex-v1',
+        status: 'fallback',
+        generatedAt: '2026-06-11T00:00:00Z',
+      },
+    };
+    const { facts, violations } = validateFactsForWire([fact]);
+    assert.equal(facts.length, 1);
+    assert.ok(violations.some((v) => v.includes('truncated')));
+    const quote = facts[0]!.provenance[0]?.quote ?? '';
+    const wordCount = quote.trim().split(/\s+/).filter((w) => !w.endsWith('…')).length;
+    assert.ok(wordCount <= 25, `trimmed quote has ${wordCount} words`);
+  });
 });

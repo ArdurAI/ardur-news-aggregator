@@ -19,6 +19,10 @@ playwright-report/
 data/runtime/
 *.local.json
 
+# ETL store — private article bodies (NEVER commit; bodies are for in-process
+# extraction only and must not appear in any public mirror).
+data/etl-store/
+
 # Env / secrets
 .env
 .env.*
