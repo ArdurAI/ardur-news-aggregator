@@ -207,7 +207,6 @@ function buildRawItems(
     // feedBody: full text from the feed (content:encoded / Atom content), stripped of HTML.
     // Only set when substantial — short snippets are not worth preferring over a URL fetch.
     const strippedContent = entry.rawContent ? stripMarkup(entry.rawContent) : '';
-    const feedBody = strippedContent.length >= 200 ? strippedContent : undefined;
 
     results.push({
       topic: topic.id,
@@ -223,7 +222,7 @@ function buildRawItems(
       publishedAt: pubDate.toISOString(),
       summaryHint: truncate(entry.description || entry.rawContent || split.title, SUMMARY_MAX_CHARS),
       feedRank: i,
-      feedBody,
+      ...(strippedContent.length >= 200 ? { feedBody: strippedContent } : {}),
     });
   }
   return results;
