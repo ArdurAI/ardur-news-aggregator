@@ -11,7 +11,7 @@
  *   - Paywalled/robots-disallowed sources receive snippet-only extraction + flagged status.
  */
 
-import { assertAllowedFetchUrl, readBoundedText, DEFAULT_FETCH_PORTS } from './source-safety.ts';
+import { normalizePublicUrl, readBoundedText, DEFAULT_FETCH_PORTS } from './source-safety.ts';
 import { checkRobots } from './robots.ts';
 import { docIdFromUrl, contentHashOf } from './etl-store.ts';
 import type { SourceDocument, SourceTier, ExtractionStatus, AccessPolicy } from '@ardurai/contracts';
@@ -163,13 +163,14 @@ export async function fetchArticle(
 ): Promise<FetchedArticle> {
   const fetchedAt = (opts.now ?? new Date()).toISOString();
 
-  let canonicalUrl: string;
-  try {
-    canonicalUrl = assertAllowedFetchUrl(url, [], { allowedPorts: DEFAULT_FETCH_PORTS });
-  } catch {
-    // Not a public URL
+  // SSRF-guard: any public HTTPS URL is allowed for article fetches; private IPs /
+  // localhost / credentials are rejected. No host-allowlist is applied here — the
+  // catalog's source.domain restriction lives at ingest time, not at fetch time.
+  const safeUrl = normalizePublicUrl(url, { allowedPorts: DEFAULT_FETCH_PORTS });
+  if (!safeUrl) {
     return makeFailedDoc(url, fetchedAt, 'tos-restricted', opts);
   }
+  let canonicalUrl = safeUrl;
 
   let host: string;
   try {
@@ -199,11 +200,17 @@ export async function fetchArticle(
     if (opts.etag) headers['if-none-match'] = opts.etag;
     if (opts.lastModified) headers['if-modified-since'] = opts.lastModified;
 
-    const response = await fetch(canonicalUrl, {
-      headers,
-      redirect: 'error',
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
+    let response: Response;
+    try {
+      response = await fetch(canonicalUrl, {
+        headers,
+        redirect: 'error',
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
+    } catch {
+      // Network error, redirect (redirect: 'error'), or timeout
+      return makeFailedDoc(canonicalUrl, fetchedAt, 'allowed', opts);
+    }
 
     if (response.status === 304) {
       // Not modified — caller can use their cached version

@@ -1437,6 +1437,146 @@ describe('#23: eTLD+1 for corroboration owner-dedup', () => {
 });
 
 // ---------------------------------------------------------------------------
+// SSRF guard fix — catalog article URLs must not be blocked by empty allowedHosts
+// ---------------------------------------------------------------------------
+
+describe('SSRF guard: article fetch URL normalization', () => {
+  test('normalizePublicUrl without allowedHosts: passes any valid public HTTPS URL', () => {
+    // Regression guard: the old fetchArticle called assertAllowedFetchUrl(url, []) which
+    // creates an empty Set — every hostname fails .has() → tos-restricted for ALL articles.
+    // Fix: use normalizePublicUrl without allowedHosts (no host-allowlist for article fetches).
+    const catalogUrl = 'https://simonwillison.net/2026/06/11/test/';
+    const result = normalizePublicUrl(catalogUrl, { allowedPorts: DEFAULT_FETCH_PORTS });
+    assert.ok(result.length > 0, 'catalog source URL must pass SSRF guard without host-allowlist');
+  });
+
+  test('assertAllowedFetchUrl(url, []): blocks any URL — this was the root-cause bug', () => {
+    // Documents the broken behavior so it is never reintroduced in content-extract.ts.
+    assert.throws(
+      () => assertAllowedFetchUrl('https://simonwillison.net/test', []),
+      /Blocked/,
+      'empty allowedHosts [] must block even valid public URLs',
+    );
+  });
+
+  test('normalizePublicUrl: still rejects private IPs (SSRF guard active)', () => {
+    assert.equal(normalizePublicUrl('https://10.0.0.1/article', { allowedPorts: DEFAULT_FETCH_PORTS }), '');
+    assert.equal(normalizePublicUrl('https://192.168.1.1/article', { allowedPorts: DEFAULT_FETCH_PORTS }), '');
+    assert.equal(normalizePublicUrl('https://localhost/article', { allowedPorts: DEFAULT_FETCH_PORTS }), '');
+  });
+
+  test('fetchArticle: private/localhost IPs still return tos-restricted (SSRF guard active after fix)', async () => {
+    // The fix removes the empty-allowedHosts block but keeps SSRF protection for private IPs.
+    const result = await fetchArticle('https://127.0.0.1/article', { title: 'test' });
+    assert.equal(result.doc.accessPolicy, 'tos-restricted', 'private IP must still be tos-restricted');
+  });
+
+  test('normalizePublicUrl: catalog article domain passes without host-allowlist (the fixed path)', () => {
+    // This is the precise gate content-extract.ts now uses instead of assertAllowedFetchUrl(url, []).
+    // huggingface.co, pytorch.org, simonwillison.net — all must pass.
+    for (const url of [
+      'https://huggingface.co/blog/llama3',
+      'https://pytorch.org/blog/introducing-pytorch-2-4/',
+      'https://simonwillison.net/2026/Jun/11/test/',
+    ]) {
+      const result = normalizePublicUrl(url, { allowedPorts: DEFAULT_FETCH_PORTS });
+      assert.ok(result.length > 0, `${url} must pass normalizePublicUrl (no host-allowlist restriction)`);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// deterministicExtract — produces non-verbatim structured facts
+// ---------------------------------------------------------------------------
+
+describe('deterministicExtract: structured meta-statements', () => {
+  const DOC_ID = 'f'.repeat(40);
+  const NOW = new Date('2026-06-11T06:00:00.000Z');
+
+  function makePairDet(body: string, id = DOC_ID): { doc: FullSourceDocument; body: string } {
+    return {
+      doc: {
+        id,
+        url: 'https://research.example.com/ai-models',
+        source: 'Research Blog',
+        sourceDomain: 'research.example.com',
+        tier: 'news',
+        title: 'AI Model Benchmarks 2026',
+        publishedAt: '2026-06-11T00:00:00Z',
+        fetchedAt: NOW.toISOString(),
+        extraction: 'full',
+        accessPolicy: 'allowed',
+        wordCount: 50,
+        lang: 'en',
+        contentHash: 'abc',
+      },
+      body,
+    };
+  }
+
+  test('extractFacts (deterministic path): produces > 0 facts from a substantive body', async () => {
+    const BODY = 'Anthropic released Claude 4 with 1 trillion parameters in June 2026. '
+      + 'The new model achieved 95% on MMLU benchmarks. '
+      + 'Google confirmed Gemini 2.0 achieved similar results on 3 major tests. '
+      + 'NVIDIA reported 3x GPU throughput improvements in the H200 chip series.';
+    const result = await extractFacts([makePairDet(BODY)], 'ai', 'cluster-det-a', NOW);
+    assert.ok(result.facts.length > 0, `deterministic extractor must produce facts (got ${result.facts.length})`);
+  });
+
+  test('extractFacts (deterministic): facts survive the copyright wire guard', async () => {
+    const BODY = 'Anthropic released Claude 4 with 1 trillion parameters in June 2026. '
+      + 'The new model achieved 95% accuracy on MMLU benchmarks. '
+      + 'OpenAI responded by announcing GPT-5 for Q3 2026.';
+    const result = await extractFacts([makePairDet(BODY)], 'ai', 'cluster-det-b', NOW);
+    const bodyMap = new Map([[DOC_ID, BODY]]);
+    const { facts: wireFacts, violations } = validateFactsForWire(result.facts, bodyMap);
+    assert.equal(violations.length, 0, `deterministic facts must pass copyright guard: ${violations.join('; ')}`);
+    assert.ok(wireFacts.length > 0, 'at least one fact must survive the copyright wire guard');
+  });
+
+  test('extractFacts (deterministic): statements are structured, not verbatim sentences', async () => {
+    const BODY = 'Anthropic released Claude 4 with 1 trillion parameters in June 2026. '
+      + 'The model achieved 95% accuracy on standard benchmarks.';
+    const result = await extractFacts([makePairDet(BODY)], 'ai', 'cluster-det-c', NOW);
+    for (const fact of result.facts) {
+      // Structured statements have < 8 tokens so they can never form an 8-gram with the source body
+      const tokenCount = (fact.statement.match(/\S+/g) ?? []).length;
+      assert.ok(tokenCount < 8, `statement "${fact.statement}" must be < 8 tokens (got ${tokenCount})`);
+    }
+  });
+
+  test('extractFacts (deterministic): each fact has a provenance quote ≤ 20 words', async () => {
+    const BODY = 'NVIDIA shipped the H200 chip with 141 GB HBM3e memory for large language model inference. '
+      + 'Microsoft Azure announced 1000 H200 nodes for enterprise AI workloads.';
+    const result = await extractFacts([makePairDet(BODY)], 'platform', 'cluster-det-d', NOW);
+    for (const fact of result.facts) {
+      for (const prov of fact.provenance) {
+        if (prov.quote) {
+          const wc = wordCount(prov.quote.replace('…', ''));
+          assert.ok(wc <= 20, `quote "${prov.quote}" exceeds 20 words (got ${wc})`);
+        }
+      }
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// feedBody capture — ingest captures content:encoded as feedBody
+// ---------------------------------------------------------------------------
+
+describe('feedBody: RawItem exposes feed full content', () => {
+  test('makeRawItem with feedBody: field is accessible', () => {
+    const item = makeRawItem({ feedBody: 'Anthropic released Claude 4 with improved reasoning capabilities.' });
+    assert.equal(item.feedBody, 'Anthropic released Claude 4 with improved reasoning capabilities.');
+  });
+
+  test('makeRawItem without feedBody: field is undefined', () => {
+    const item = makeRawItem();
+    assert.equal(item.feedBody, undefined);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // contracts #2 — parseAggregationArtifact rejects malformed input
 // ---------------------------------------------------------------------------
 

@@ -39,7 +39,7 @@ import { dedupe } from './dedup.ts';
 import { clusterItems } from './cluster.ts';
 import { captureInteractionMetrics } from './interaction.ts';
 import { defaultSearchProviders, searchAllProviders } from './search-provider.ts';
-import { fileEtlStore, docIdFromUrl } from './etl-store.ts';
+import { fileEtlStore, docIdFromUrl, contentHashOf } from './etl-store.ts';
 import { fetchArticle } from './content-extract.ts';
 import { normalizePublicUrl } from './source-safety.ts';
 import { extractFacts } from './fact-extractor.ts';
@@ -123,6 +123,7 @@ async function runEtlForTopic(
     fetchTimeoutMs: number;
     now: Date;
   },
+  feedBodyByUrl: Map<string, string> = new Map(),
 ): Promise<{
   documents: SourceDocument[];
   factsByCluster: Record<string, ExtractedFact[]>;
@@ -173,15 +174,77 @@ async function runEtlForTopic(
 
     // Fetch + store each URL in the cluster (concurrent within cluster, budget-controlled)
     const fetchPromises = urlsToFetch.map(async (item) => {
-      // Check if we already have a fresh copy in the store
-      const existing = await fileEtlStore.getById(docIdFromUrl(item.url));
-      if (existing) {
+      const docId = docIdFromUrl(item.url);
+      const fetchedAt = opts.now.toISOString();
+
+      // 1. Cache hit: reuse a previously-stored successful document.
+      //    Skip if the cached doc has extraction=failed — it may have been stored under the
+      //    old SSRF bug where an empty allowedHosts blocked all article fetches.
+      const existing = await fileEtlStore.getById(docId);
+      if (existing && existing.extraction !== 'failed') {
         clusterDocs.push(existing);
         const body = await fileEtlStore.getBody(existing.id);
         if (body) bodies.set(existing.id, body);
         return;
       }
 
+      // 2. Feed full content (content:encoded / Atom content) — preferred over URL fetch
+      //    because it's already available, no network round-trip, no paywall concern.
+      const feedBody = feedBodyByUrl.get(item.url);
+      if (feedBody && feedBody.length >= 100) {
+        const feedDoc: SourceDocument = {
+          id: docId,
+          url: item.url,
+          source: item.source,
+          sourceDomain: item.sourceDomain,
+          tier: item.tier,
+          title: item.title,
+          publishedAt: item.publishedAt,
+          fetchedAt,
+          extraction: feedBody.length >= 500 ? 'full' : 'snippet',
+          accessPolicy: 'allowed',
+          wordCount: feedBody.split(/\s+/).filter(Boolean).length,
+          lang: 'en',
+          contentHash: contentHashOf(feedBody),
+        };
+        await fileEtlStore.put(feedDoc, feedBody, {});
+        clusterDocs.push(feedDoc);
+        bodies.set(feedDoc.id, feedBody);
+        return;
+      }
+
+      // 3. Google News redirect URLs cannot be fetched directly (they 301 to the real article).
+      //    Use summaryHint as a minimal body for fact extraction.
+      let itemDomain = '';
+      try { itemDomain = new URL(item.url).hostname; } catch { /* keep empty */ }
+      if (itemDomain === 'news.google.com') {
+        const summaryBody = (item.summaryHint ?? '').trim();
+        if (summaryBody.length >= 50) {
+          const summaryDoc: SourceDocument = {
+            id: docId,
+            url: item.url,
+            source: item.source,
+            sourceDomain: item.sourceDomain,
+            tier: item.tier,
+            title: item.title,
+            publishedAt: item.publishedAt,
+            fetchedAt,
+            extraction: 'snippet',
+            accessPolicy: 'allowed',
+            wordCount: summaryBody.split(/\s+/).filter(Boolean).length,
+            lang: 'en',
+            contentHash: contentHashOf(summaryBody),
+          };
+          await fileEtlStore.put(summaryDoc, summaryBody, {});
+          clusterDocs.push(summaryDoc);
+          bodies.set(summaryDoc.id, summaryBody);
+        } else {
+          warnings.push(`[${topicId}/${cluster.clusterId}] google-news redirect — no extractable body: ${item.url}`);
+        }
+        return;
+      }
+
+      // 4. Normal URL fetch (robots.txt respected, SSRF-guarded, paywall-detected)
       const fetched = await fetchArticle(item.url, {
         title: item.title,
         publishedAt: item.publishedAt,
@@ -412,11 +475,23 @@ export async function runAggregation(options: AggregationOptions = {}): Promise<
     // A3 + A4 + A5: ETL — full-text fetch + fact extraction + copyright guard
     // --------------------------------------------------------------------------
     if (etlEnabled) {
+      // Build URL → feedBody map from all ingest results so runEtlForTopic can
+      // prefer feed full content (content:encoded) over fetching the article URL.
+      const feedBodyByUrl = new Map<string, string>();
+      for (const r of ingestResults) {
+        for (const item of r.items) {
+          if (item.feedBody && !feedBodyByUrl.has(item.url)) {
+            feedBodyByUrl.set(item.url, item.feedBody);
+          }
+        }
+      }
+
       const { documents, factsByCluster, warnings: etlWarnings } = await runEtlForTopic(
         topic.id,
         finalItems,
         clusters,
         { fetchBudget: etlFetchBudgetPerTopic, fetchTimeoutMs: perSourceTimeoutMs, now },
+        feedBodyByUrl,
       );
 
       warnings.push(...etlWarnings);

@@ -27,6 +27,8 @@ export interface RawItem {
   publishedAt: string;
   summaryHint: string;
   feedRank: number;
+  /** Full article text shipped in the feed (content:encoded / Atom content), stripped of HTML. */
+  feedBody?: string;
 }
 
 export interface IngestResult {
@@ -105,6 +107,8 @@ interface ParsedEntry {
   sourceLabel: string;
   sourceUrl: string;
   description: string;
+  /** Full content from the feed (content:encoded for RSS, content for Atom). May be HTML. */
+  rawContent: string;
 }
 
 function parseRssChannel(parsed: Record<string, unknown>): ParsedEntry[] {
@@ -131,7 +135,8 @@ function parseRssChannel(parsed: Record<string, unknown>): ParsedEntry[] {
         pubDate: String(item['pubDate'] ?? item['dc:date'] ?? ''),
         sourceLabel,
         sourceUrl,
-        description: String(item['description'] ?? item['content:encoded'] ?? ''),
+        description: String(item['description'] ?? ''),
+        rawContent: String(item['content:encoded'] ?? item['description'] ?? ''),
       };
     });
   }
@@ -161,9 +166,10 @@ function parseRssChannel(parsed: Record<string, unknown>): ParsedEntry[] {
         pubDate: String(entry['published'] ?? entry['updated'] ?? ''),
         sourceLabel: String(feed['title']?.['#text'] ?? feed['title'] ?? ''),
         sourceUrl: '',
-        description: String(
-          entry['summary']?.['#text'] ?? entry['summary'] ??
-          entry['content']?.['#text'] ?? entry['content'] ?? '',
+        description: String(entry['summary']?.['#text'] ?? entry['summary'] ?? ''),
+        rawContent: String(
+          entry['content']?.['#text'] ?? entry['content'] ??
+          entry['summary']?.['#text'] ?? entry['summary'] ?? '',
         ),
       };
     });
@@ -198,6 +204,11 @@ function buildRawItems(
       : '';
     const normalizedSourceUrl = rawSourceUrl ? normalizePublicUrl(rawSourceUrl) : '';
 
+    // feedBody: full text from the feed (content:encoded / Atom content), stripped of HTML.
+    // Only set when substantial — short snippets are not worth preferring over a URL fetch.
+    const strippedContent = entry.rawContent ? stripMarkup(entry.rawContent) : '';
+    const feedBody = strippedContent.length >= 200 ? strippedContent : undefined;
+
     results.push({
       topic: topic.id,
       topicLabel: topic.label,
@@ -210,8 +221,9 @@ function buildRawItems(
       url: itemUrl,
       tier: source.tier,
       publishedAt: pubDate.toISOString(),
-      summaryHint: truncate(entry.description || split.title, SUMMARY_MAX_CHARS),
+      summaryHint: truncate(entry.description || entry.rawContent || split.title, SUMMARY_MAX_CHARS),
       feedRank: i,
+      feedBody,
     });
   }
   return results;
