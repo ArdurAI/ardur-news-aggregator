@@ -471,13 +471,12 @@ describe('cluster', () => {
   });
 
   test('clusterItems: cluster distinctDomains counts correctly', () => {
+    // Both items share the same default title → token overlap = 1.0 > threshold 0.5 → always one cluster.
     const a = makeAggItem({ id: 'a1', sourceDomain: 'techcrunch.com', fingerprint: 'fa' });
     const b = makeAggItem({ id: 'a2', sourceDomain: 'theverge.com', fingerprint: 'fb' });
     const { clusters } = clusterItems([a, b], { threshold: 0.5, importantTerms: ['openai', 'gpt', 'model'] });
-    if (clusters.length === 1) {
-      assert.equal(clusters[0]!.distinctDomains, 2);
-    }
-    // If they ended up in separate clusters, that's valid for high threshold
+    assert.equal(clusters.length, 1, 'identical-title items at threshold 0.5 must always cluster');
+    assert.equal(clusters[0]!.distinctDomains, 2);
   });
 
   test('clusterItems: tierHistogram sums to memberIds.length', () => {
@@ -1632,5 +1631,56 @@ describe('contracts #2: parseAggregationArtifact at boundary', () => {
         data: {},
       }),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #27 — hostile-input coverage: proto-pollution, oversized titles, weird chars
+// ---------------------------------------------------------------------------
+
+describe('#27 hostile-input: clustering and dedup robustness', () => {
+  test('clusterItems: __proto__ in item title does not throw or pollute Object.prototype', () => {
+    const protoItem = makeAggItem({
+      id: 'proto1',
+      title: '__proto__ constructor toString valueOf',
+      fingerprint: 'fp-proto',
+    });
+    const normal = makeAggItem({ id: 'n1', fingerprint: 'fp-n1' });
+    assert.doesNotThrow(() => clusterItems([protoItem, normal], { threshold: 0.5, importantTerms: [] }));
+    // Verify Object.prototype was not polluted
+    assert.equal((Object.prototype as Record<string, unknown>)['injected'], undefined);
+  });
+
+  test('clusterItems: oversized title (10 000 chars) does not throw', () => {
+    const bigTitle = 'openai gpt model '.repeat(588).trim(); // ~10 000 chars
+    const item = makeAggItem({ id: 'big1', title: bigTitle, fingerprint: 'fp-big' });
+    const other = makeAggItem({ id: 'big2', fingerprint: 'fp-big2' });
+    assert.doesNotThrow(() => clusterItems([item, other], { threshold: 0.5, importantTerms: ['openai', 'gpt'] }));
+  });
+
+  test('clusterItems: empty-string title items form their own clusters without throwing', () => {
+    const empty1 = makeAggItem({ id: 'e1', title: '', fingerprint: 'fp-e1' });
+    const empty2 = makeAggItem({ id: 'e2', title: '', fingerprint: 'fp-e2' });
+    assert.doesNotThrow(() => {
+      const { clusters } = clusterItems([empty1, empty2], { threshold: 0.5, importantTerms: [] });
+      assert.ok(clusters.length >= 1, 'must return at least one cluster');
+    });
+  });
+
+  test('fingerprint: null-byte and control chars produce stable output', async () => {
+    const { fingerprint: fp } = await import('./dedup.ts');
+    const item = { title: '\x00\x01\x02 __proto__ ￿', url: 'https://example.com/test' };
+    const result = fp(item);
+    assert.ok(typeof result === 'string', 'fingerprint must return a string');
+    assert.equal(result, fp(item), 'fingerprint must be deterministic');
+  });
+
+  test('dedupe: items with __proto__ key in title do not corrupt dedup map', async () => {
+    const { dedupe } = await import('./dedup.ts');
+    const item = {
+      ...makeAggItem({ id: 'dp1', title: '__proto__', fingerprint: 'fpd' }),
+      clusterId: 'c1',
+    };
+    assert.doesNotThrow(() => dedupe([item]));
   });
 });
