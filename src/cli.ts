@@ -95,7 +95,7 @@ async function main(): Promise<void> {
   }
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((err: unknown) => {
     process.stderr.write(`[engine] unhandled: ${err instanceof Error ? err.message : String(err)}\n`);
     process.exitCode = 1;
