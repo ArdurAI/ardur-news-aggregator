@@ -1141,6 +1141,36 @@ describe('runners: parseRunnerArgs', () => {
   test('--max-age-hours sets maxAgeHours', () => {
     assert.equal(parseRunnerArgs(['--max-age-hours', '48']).maxAgeHours, 48);
   });
+
+  // #27 hostile-input: numeric flags must not silently eat 0 or NaN
+  test('--etl-budget 0: zero is preserved, not replaced by default', () => {
+    // Number('0') || 30 = 30 (bug); Number.isFinite check must keep 0
+    assert.equal(parseRunnerArgs(['--etl-budget', '0']).etlFetchBudgetPerTopic, 0);
+  });
+
+  test('--timeout 0: zero is preserved, not replaced by default', () => {
+    assert.equal(parseRunnerArgs(['--timeout', '0']).timeoutMs, 0);
+  });
+
+  test('--concurrency 0: zero is preserved, not replaced by default', () => {
+    assert.equal(parseRunnerArgs(['--concurrency', '0']).concurrency, 0);
+  });
+
+  test('--etl-budget NaN: falls back to default (30)', () => {
+    assert.equal(parseRunnerArgs(['--etl-budget', 'notanumber']).etlFetchBudgetPerTopic, 30);
+  });
+
+  test('--timeout NaN: falls back to default (15000)', () => {
+    assert.equal(parseRunnerArgs(['--timeout', 'notanumber']).timeoutMs, 15_000);
+  });
+
+  test('--concurrency NaN: falls back to default (10)', () => {
+    assert.equal(parseRunnerArgs(['--concurrency', 'notanumber']).concurrency, 10);
+  });
+
+  test('--max-age-hours 0: zero is preserved, not replaced by default', () => {
+    assert.equal(parseRunnerArgs(['--max-age-hours', '0']).maxAgeHours, 0);
+  });
 });
 
 describe('runners: deriveRunId', () => {

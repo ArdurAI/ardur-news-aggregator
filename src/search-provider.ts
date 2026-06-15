@@ -12,6 +12,7 @@
 import { XMLParser } from 'fast-xml-parser';
 import { assertAllowedFetchUrl, readBoundedText, normalizePublicUrl, GOOGLE_NEWS_FETCH_HOSTS } from './source-safety.ts';
 import type { SourceTier } from '@ardurai/contracts';
+import { stripMarkup } from './util.ts';
 
 const SEARCH_USER_AGENT = 'ArdurAI/1.0 (+https://ardur.ai)';
 const SEARCH_MAX_BYTES = 1_500_000;
@@ -47,7 +48,7 @@ const KNOWN_TECHNICAL_NEWS = new Set([
 ]);
 const KNOWN_SECURITY_NEWS = new Set([
   'thehackernews.com', 'bleepingcomputer.com', 'threatpost.com',
-  'krebs onsecurity.com', 'darkreading.com', 'securityweek.com',
+  'krebsonsecurity.com', 'darkreading.com', 'securityweek.com',
 ]);
 
 export function classifyDiscoveredDomain(domain: string): { tier: SourceTier; credibilityHint: number } {
@@ -64,10 +65,6 @@ export function classifyDiscoveredDomain(domain: string): { tier: SourceTier; cr
 function toArray<T>(val: T | T[] | undefined): T[] {
   if (val === undefined || val === null) return [];
   return Array.isArray(val) ? val : [val];
-}
-
-function stripMarkup(text: string): string {
-  return text.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 export class GoogleNewsSearchProvider implements SearchProvider {

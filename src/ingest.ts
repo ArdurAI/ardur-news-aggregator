@@ -14,6 +14,7 @@ import {
   GOOGLE_NEWS_FETCH_HOSTS,
   DEFAULT_FETCH_PORTS,
 } from './source-safety.ts';
+import { stripMarkup } from './util.ts';
 
 export interface RawItem {
   topic: string;
@@ -52,16 +53,7 @@ const EXTRA_FEED_HOSTS = new Set([
   'feeds.feedburner.com',
   'feed.infoq.com',
   'export.arxiv.org',
-  'feeds.feedburner.com',
 ]);
-
-function stripMarkup(text: string): string {
-  return text
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/[*_~`#[\]()!]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
 
 function splitTitle(rawTitle: string, fallbackSource: string): { title: string; source: string } {
   const cleaned = stripMarkup(rawTitle);
@@ -239,7 +231,10 @@ export async function ingestSource(
   topic: TopicDefinition,
   opts: { now: Date; maxAgeMs: number; perSourceTimeoutMs?: number },
 ): Promise<IngestResult> {
-  const timeout = opts.perSourceTimeoutMs ?? 30_000;
+  const DEFAULT_TIMEOUT_MS = 30_000;
+  const timeout = Number.isFinite(opts.perSourceTimeoutMs ?? DEFAULT_TIMEOUT_MS)
+    ? (opts.perSourceTimeoutMs ?? DEFAULT_TIMEOUT_MS)
+    : DEFAULT_TIMEOUT_MS;
   try {
     let feedUrl: string;
     let allowedHosts: Set<string>;

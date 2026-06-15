@@ -4,14 +4,7 @@
  */
 
 import type { RawItem } from './ingest.ts';
-
-function stripMarkup(text: string): string {
-  return text
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/[*_~`#[\]()!]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
+import { stripMarkup } from './util.ts';
 
 function normalizeTitle(title: string): string {
   return stripMarkup(title).toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();

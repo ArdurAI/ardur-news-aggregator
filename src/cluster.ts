@@ -4,6 +4,7 @@
  */
 
 import type { AggregatedItem, Cluster, SourceTier } from '@ardurai/contracts';
+import { stripMarkup } from './util.ts';
 
 const STOPWORDS = new Set([
   'the','a','an','is','are','was','were','be','been','being','have','has','had',
@@ -22,14 +23,6 @@ const BASE_IMPORTANT = new Set([
   'terraform','helm','istio','prometheus','grafana','zero-day','ransomware',
   'supply-chain','openssl','oauth','iam','rbac','ebpf','wasm','webassembly',
 ]);
-
-export function stripMarkup(text: string): string {
-  return text
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/[*_~`#[\]()!]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
 
 function tokens(text: string): string[] {
   return stripMarkup(text)

@@ -325,16 +325,20 @@ export function parseRunnerArgs(argv: string[]): ParsedRunnerArgs {
     } else if (a === '--etl') {
       etlEnabled = true;
     } else if (a === '--etl-budget' && next !== undefined) {
-      etlFetchBudgetPerTopic = Number(next) || 30;
+      const parsed = Number(next);
+      etlFetchBudgetPerTopic = Number.isFinite(parsed) ? parsed : 30;
       i++;
     } else if (a === '--max-age-hours' && next !== undefined) {
-      maxAgeHours = Number(next) || 36;
+      const parsed = Number(next);
+      maxAgeHours = Number.isFinite(parsed) ? parsed : 36;
       i++;
     } else if (a === '--timeout' && next !== undefined) {
-      timeoutMs = Number(next) || 15_000;
+      const parsed = Number(next);
+      timeoutMs = Number.isFinite(parsed) ? parsed : 15_000;
       i++;
     } else if (a === '--concurrency' && next !== undefined) {
-      concurrency = Number(next) || 10;
+      const parsed = Number(next);
+      concurrency = Number.isFinite(parsed) ? parsed : 10;
       i++;
     }
   }
@@ -369,7 +373,32 @@ async function main(): Promise<void> {
     return;
   }
 
-  const now = args.nowIso ? new Date(args.nowIso) : new Date();
+  let now: Date;
+  if (args.nowIso) {
+    try {
+      const parsed = new Date(args.nowIso);
+      if (!Number.isFinite(parsed.valueOf())) {
+        throw new RangeError(`Invalid date: "${args.nowIso}"`);
+      }
+      // Call toISOString() here to surface any RangeError from invalid dates early.
+      parsed.toISOString();
+      now = parsed;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (args.jsonErrors) {
+        const envelope: StructuredErrorEnvelope = {
+          error: { code: 'INVALID_ARGUMENT', message: `--now: ${msg}`, stage: 'aggregation' },
+        };
+        process.stdout.write(JSON.stringify(envelope, null, 2) + '\n');
+      } else {
+        process.stderr.write(`[ardur-news-aggregator] --now: invalid date "${args.nowIso}": ${msg}\n`);
+      }
+      process.exitCode = 1;
+      return;
+    }
+  } else {
+    now = new Date();
+  }
   const resolvedRunId =
     args.runId ?? (args.nowIso ? deriveRunId(args.nowIso) : undefined);
 
