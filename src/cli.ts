@@ -10,6 +10,7 @@
  */
 
 import { writeFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import { runAggregation } from './index.ts';
 import type { SourceDocument, ExtractedFact } from '@ardurai/contracts';
 
@@ -94,7 +95,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error: unknown) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err: unknown) => {
+    process.stderr.write(`[engine] unhandled: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.exitCode = 1;
+  });
+}

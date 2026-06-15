@@ -19,6 +19,7 @@
 
 import { createHash } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import { runAggregation } from './index.ts';
 import {
   SCHEMA_VERSION,
@@ -455,9 +456,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err: unknown) => {
-  process.stderr.write(
-    `[ardur-news-aggregator] unhandled: ${err instanceof Error ? err.message : String(err)}\n`,
-  );
-  process.exitCode = 1;
-});
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((err: unknown) => {
+    process.stderr.write(`[engine] unhandled: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.exitCode = 1;
+  });
+}
