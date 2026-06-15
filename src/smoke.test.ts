@@ -1675,12 +1675,13 @@ describe('#27 hostile-input: clustering and dedup robustness', () => {
     assert.equal(result, fp(item), 'fingerprint must be deterministic');
   });
 
-  test('dedupe: items with __proto__ key in title do not corrupt dedup map', async () => {
-    const { dedupe } = await import('./dedup.ts');
-    const item = {
-      ...makeAggItem({ id: 'dp1', title: '__proto__', fingerprint: 'fpd' }),
-      clusterId: 'c1',
+  test('dedupe: items with __proto__ key in title do not corrupt dedup map', () => {
+    const rawItem: import('./ingest.ts').RawItem = {
+      topic: 'ai', topicLabel: 'AI', title: '__proto__', source: 'Test',
+      sourceDomain: 'test.com', sourceUrl: 'https://test.com/feed',
+      url: 'https://test.com/article', tier: 'news', publishedAt: '2026-06-01T00:00:00Z',
+      summaryHint: '', feedRank: 0,
     };
-    assert.doesNotThrow(() => dedupe([item]));
+    assert.doesNotThrow(() => dedupe([rawItem]));
   });
 });
