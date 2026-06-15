@@ -109,11 +109,21 @@ async function fetchRobots(host: string): Promise<ParsedRobots> {
       return { disallowed: [], allowed: [], crawlDelaySeconds: null, fetchedAt: Date.now() };
     }
 
-    const resp = await fetch(validated, {
-      headers: { 'user-agent': `${ROBOTS_USER_AGENT}/1.0 (+https://ardur.ai/bot)` },
-      redirect: 'follow',
-      signal: AbortSignal.timeout(ROBOTS_FETCH_TIMEOUT_MS),
-    });
+    let resp: Response;
+    try {
+      resp = await fetch(validated, {
+        headers: { 'user-agent': `${ROBOTS_USER_AGENT}/1.0 (+https://ardur.ai/bot)` },
+        redirect: 'error',
+        signal: AbortSignal.timeout(ROBOTS_FETCH_TIMEOUT_MS),
+      });
+    } catch {
+      // Network error, redirect, or timeout — fail-open (no restrictions assumed).
+      // Do NOT follow redirects: a redirect could point at an internal host that
+      // passed the initial normalizePublicUrl check but shouldn't be re-fetched
+      // without re-validation.
+      const empty = parseRobotsText('');
+      return { ...empty, fetchedAt: Date.now() };
+    }
 
     if (resp.ok) {
       const raw = await resp.text();
@@ -121,7 +131,7 @@ async function fetchRobots(host: string): Promise<ParsedRobots> {
     }
     // 4xx/5xx = assume allowed (fail-open for robots.txt fetch failures)
   } catch {
-    // Network error = treat as no restrictions (fail-open)
+    // Outer catch: normalizePublicUrl threw or other unexpected error — no restrictions.
   }
 
   const parsed = parseRobotsText(text);

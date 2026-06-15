@@ -199,9 +199,11 @@ function buildRawItems(
     const itemUrl = normalizePublicUrl(entry.url);
     if (!itemUrl) continue;
 
-    const rawSourceUrl = entry.sourceUrl || source.strategy.kind === 'rss'
-      ? (source.strategy as { kind: 'rss'; feedUrl: string }).feedUrl ?? ''
-      : '';
+    const rawSourceUrl = entry.sourceUrl
+      ? entry.sourceUrl
+      : source.strategy.kind === 'rss'
+        ? source.strategy.feedUrl
+        : '';
     const normalizedSourceUrl = rawSourceUrl ? normalizePublicUrl(rawSourceUrl) : '';
 
     // feedBody: full text from the feed (content:encoded / Atom content), stripped of HTML.

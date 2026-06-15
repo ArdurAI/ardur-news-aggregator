@@ -17,7 +17,7 @@
  * When disabled the pipeline behaves exactly as before (CI-friendly).
  */
 
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import type {
   AggregationArtifact,
   AggregatedItem,
@@ -52,6 +52,54 @@ export type { SourceDefinition, TopicDefinition, FetchStrategy } from './sources
 export type { RawItem, IngestResult } from './ingest.ts';
 export type { SearchProvider, SearchResult } from './search-provider.ts';
 export type { EtlStore } from './etl-store.ts';
+
+// ---------------------------------------------------------------------------
+// Domain normalisation — MIRRORED verbatim in ardur-ranking-engine signals.ts
+// Edit both repos in lockstep.
+// ---------------------------------------------------------------------------
+
+/**
+ * Strip userinfo, port, and www. prefix from a raw hostname so that two URLs
+ * that differ only in those inert components collapse to the same key.
+ */
+function normalizeOwnerDomain(domain: string): string {
+  let d = domain.toLowerCase().trim();
+  // Strip userinfo (e.g. "cdn@example.com" → "example.com")
+  const atIdx = d.lastIndexOf('@');
+  if (atIdx >= 0) d = d.slice(atIdx + 1);
+  // Strip port (e.g. "example.com:8080" → "example.com")
+  const portIdx = d.lastIndexOf(':');
+  if (portIdx >= 0) d = d.slice(0, portIdx);
+  // Strip www. prefix (e.g. "www.example.com" → "example.com")
+  if (d.startsWith('www.')) d = d.slice(4);
+  return d;
+}
+
+/**
+ * Reduce a raw hostname to its registrable domain (eTLD+1 heuristic).
+ *
+ * Handles the most common two-part TLDs (co.uk, com.au, etc.) without
+ * requiring a Public Suffix List dependency.  Subdomains of the same
+ * publisher collapse to one key so they can't inflate corroboration.
+ *
+ * This definition is MIRRORED verbatim in ardur-ranking-engine and
+ * ardur-news-aggregator — edit both repos in lockstep.
+ */
+const KNOWN_TWO_PART_TLDS = new Set([
+  'co.uk', 'co.jp', 'co.nz', 'co.za', 'co.in', 'co.kr', 'co.id', 'co.il',
+  'com.au', 'com.br', 'com.mx', 'com.ar', 'com.co', 'com.sg', 'com.hk', 'com.tw',
+  'org.uk', 'net.au', 'net.nz', 'ac.uk', 'gov.uk', 'edu.au', 'edu.sg',
+]);
+
+function registrableDomain(hostname: string): string {
+  const parts = hostname.split('.');
+  if (parts.length <= 2) return hostname;
+  const last2 = `${parts[parts.length - 2]}.${parts[parts.length - 1]}`;
+  if (KNOWN_TWO_PART_TLDS.has(last2) && parts.length >= 3) {
+    return `${parts[parts.length - 3]}.${last2}`;
+  }
+  return last2;
+}
 
 export interface AggregationOptions {
   cycle?: CycleMeta;
@@ -409,7 +457,7 @@ export async function runAggregation(options: AggregationOptions = {}): Promise<
     }
 
     const preCluster = dedupedItems.map((item): Omit<AggregatedItem, 'clusterId'> => {
-      const id = `${item.topic}-${item.fingerprint.slice(0, 24).replace(/[^a-z0-9]/g, '')}`;
+      const id = `${item.topic}-${createHash('sha256').update(item.fingerprint).digest('hex').slice(0, 32)}`;
       const interaction = captureInteractionMetrics(
         { feedRank: item.feedRank },
         { capturedAt: now, provenance: 'rss-feed-position' },
@@ -453,7 +501,7 @@ export async function runAggregation(options: AggregationOptions = {}): Promise<
       };
     });
 
-    const distinctDomains = new Set(finalItems.map((i) => i.sourceDomain)).size;
+    const distinctDomains = new Set(finalItems.map((i) => registrableDomain(normalizeOwnerDomain(i.sourceDomain)))).size;
     const degraded = distinctDomains < topic.diversityFloor;
     if (degraded) {
       warnings.push(
@@ -523,7 +571,7 @@ export async function runAggregation(options: AggregationOptions = {}): Promise<
     sourcesConfigured: Object.values(coverageByTopic).reduce((s, c) => s + c.sourcesConfigured, 0),
     sourcesQueried: Object.values(coverageByTopic).reduce((s, c) => s + c.sourcesQueried, 0),
     sourcesResponded: Object.values(coverageByTopic).reduce((s, c) => s + c.sourcesResponded, 0),
-    distinctDomains: new Set(globalItems.map((i) => i.sourceDomain)).size,
+    distinctDomains: new Set(globalItems.map((i) => registrableDomain(normalizeOwnerDomain(i.sourceDomain)))).size,
     degraded: false,
   };
 
