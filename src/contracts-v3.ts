@@ -1,9 +1,10 @@
 /**
  * Rev-3 contract bridge.
  *
- * @ardurai/contracts now ships rev 3 (CONTRACT_REVISION=3) — all core types
- * (SourceDocument, FactProvenance, ExtractedFact, ExtractionStatus, AccessPolicy,
- * AggregationData.documentsByTopic?, AggregationData.factsByCluster?) are
+ * @ardurai/contracts ships the current shared contract revision (rev 5 as of
+ * the Hermes provider metadata rollout). Rev 3 ETL types (SourceDocument,
+ * FactProvenance, ExtractedFact, ExtractionStatus, AccessPolicy,
+ * AggregationData.documentsByTopic?, AggregationData.factsByCluster?) remain
  * available from the package directly.
  *
  * This file re-exports them for backwards compatibility with local imports,

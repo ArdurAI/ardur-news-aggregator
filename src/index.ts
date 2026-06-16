@@ -43,6 +43,8 @@ import { fileEtlStore, docIdFromUrl, contentHashOf } from './etl-store.ts';
 import { fetchArticle } from './content-extract.ts';
 import { normalizePublicUrl } from './source-safety.ts';
 import { extractFacts } from './fact-extractor.ts';
+import { resolveFactExtractionProviderMode } from './fact-providers.ts';
+import type { FactExtractionProviderMode } from './fact-providers.ts';
 import { validateFactsForWire } from './copyright-guard.ts';
 import type { RawItem } from './ingest.ts';
 
@@ -115,6 +117,10 @@ export interface AggregationOptions {
   etlFetchBudgetPerTopic?: number;
   /** Per-article fetch timeout in ms during ETL. Default: 20 000. */
   etlArticleTimeoutMs?: number;
+  /** AI fact extraction provider. Defaults to ARDUR_AI_PROVIDER or deterministic. */
+  aiProvider?: FactExtractionProviderMode | string;
+  /** Per-provider fact extraction timeout in ms. Defaults to provider/env defaults. */
+  aiTimeoutMs?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -170,6 +176,8 @@ async function runEtlForTopic(
     fetchBudget: number;
     fetchTimeoutMs: number;
     now: Date;
+    aiProvider: FactExtractionProviderMode;
+    aiTimeoutMs?: number;
   },
   feedBodyByUrl: Map<string, string> = new Map(),
 ): Promise<{
@@ -339,11 +347,17 @@ async function runEtlForTopic(
       continue;
     }
 
+    const factExtractionOptions: Parameters<typeof extractFacts>[4] = {
+      providerMode: opts.aiProvider,
+    };
+    if (opts.aiTimeoutMs !== undefined) factExtractionOptions.timeoutMs = opts.aiTimeoutMs;
+
     const { facts, warnings: factWarnings } = await extractFacts(
       pairs,
       topicId,
       cluster.clusterId,
       opts.now,
+      factExtractionOptions,
     );
     warnings.push(...factWarnings.map((w) => `[${topicId}/${cluster.clusterId}] ${w}`));
 
@@ -374,6 +388,7 @@ export async function runAggregation(options: AggregationOptions = {}): Promise<
   const etlEnabled =
     options.etlEnabled ?? process.env['ARDUR_ETL_ENABLED'] === 'true';
   const etlFetchBudgetPerTopic = options.etlFetchBudgetPerTopic ?? 30;
+  const aiProvider = resolveFactExtractionProviderMode(options.aiProvider);
 
   const allTopics = loadTopics();
   const activeTopics = allTopics.filter((t) => t.id !== 'all');
@@ -538,7 +553,13 @@ export async function runAggregation(options: AggregationOptions = {}): Promise<
         topic.id,
         finalItems,
         clusters,
-        { fetchBudget: etlFetchBudgetPerTopic, fetchTimeoutMs: perSourceTimeoutMs, now },
+        {
+          fetchBudget: etlFetchBudgetPerTopic,
+          fetchTimeoutMs: perSourceTimeoutMs,
+          now,
+          aiProvider,
+          ...(options.aiTimeoutMs !== undefined ? { aiTimeoutMs: options.aiTimeoutMs } : {}),
+        },
         feedBodyByUrl,
       );
 

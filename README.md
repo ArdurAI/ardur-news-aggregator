@@ -88,8 +88,23 @@ npm run build
 ```
 
 Configuration is environment-driven; copy `.env.example` to `.env`. The default
-path is deterministic and zero-cost — no AI calls happen in this engine
-(synthesis is stage 4).
+path is deterministic and zero-cost. Fact extraction can opt into
+`ARDUR_AI_PROVIDER=ollama|openai|hermes` when ETL is enabled; `ARDUR_AI_ENABLED=0`
+forces deterministic extraction and prevents external provider calls.
+
+Hermes support is explicit-only and below the aggregator boundary: Hermes returns
+candidate JSON only, while this repo still creates fact IDs, provenance,
+corroboration, shared Zod validation, copyright checks, and deterministic
+fallback. CLI usage:
+
+```bash
+ARDUR_ETL_ENABLED=true ARDUR_AI_PROVIDER=hermes npm run aggregate -- --provider hermes
+npm run aggregate -- --provider hermes --etl --out data/hermes-sample.json
+```
+
+Hermes command configuration uses `HERMES_FACT_EXTRACT_COMMAND`,
+`HERMES_FACT_EXTRACT_ARGS`, and `HERMES_FACT_EXTRACT_MODEL`; no keys, raw prompts,
+or raw completions are written to artifacts.
 
 ## Guarantees
 

@@ -6,7 +6,7 @@
  *
  *   --in  <path|->   Accepted but ignored (Stage 1 has no upstream input)
  *   --out <path|->   Write artifact to path, or stdout when omitted or '-'
- *   --provider <n>   AI provider: deterministic|ollama|openai (default: env / deterministic)
+ *   --provider <n>   AI provider: deterministic|ollama|openai|hermes (default: env / deterministic)
  *   --now <iso>      Pin wall-clock; drives cycle window + generatedAt deterministically
  *   --run-id <id>    Pin runId; combined with --now → byte-identical output on repeat runs
  *   --describe       Emit engine schema spec (derived from @ardurai/contracts) and exit
@@ -27,6 +27,10 @@ import {
   type AggregationArtifact,
 } from '@ardurai/contracts';
 import { parseAggregationArtifact } from '@ardurai/contracts/zod';
+import {
+  isFactExtractionProviderMode,
+  resolveFactExtractionProviderMode,
+} from './fact-providers.ts';
 
 // ---------------------------------------------------------------------------
 // --describe: engine schema spec derived from @ardurai/contracts constants
@@ -138,7 +142,7 @@ export function buildDescribeOutput(): DescribeOutput {
       '--out': { type: 'string', default: '-', description: 'Output path or - for stdout' },
       '--provider': {
         type: 'string',
-        enum: ['deterministic', 'ollama', 'openai'],
+        enum: ['deterministic', 'ollama', 'openai', 'hermes'],
         default: 'deterministic',
         description: 'AI provider override (also: ARDUR_AI_PROVIDER env var)',
       },
@@ -402,9 +406,20 @@ async function main(): Promise<void> {
   const resolvedRunId =
     args.runId ?? (args.nowIso ? deriveRunId(args.nowIso) : undefined);
 
-  if (args.provider !== 'deterministic') {
-    process.env['ARDUR_AI_PROVIDER'] = args.provider;
+  if (!isFactExtractionProviderMode(args.provider)) {
+    const message = `--provider must be one of deterministic, ollama, openai, hermes; got "${args.provider}"`;
+    if (args.jsonErrors) {
+      const envelope: StructuredErrorEnvelope = {
+        error: { code: 'INVALID_ARGUMENT', message, stage: 'aggregation' },
+      };
+      process.stdout.write(JSON.stringify(envelope, null, 2) + '\n');
+    } else {
+      process.stderr.write(`[ardur-news-aggregator] ${message}\n`);
+    }
+    process.exitCode = 1;
+    return;
   }
+  const providerMode = resolveFactExtractionProviderMode(args.provider);
 
   if (args.fixturesDir !== null) {
     process.stderr.write(
@@ -434,6 +449,8 @@ async function main(): Promise<void> {
         concurrency: args.concurrency,
         etlEnabled: args.etlEnabled,
         etlFetchBudgetPerTopic: args.etlFetchBudgetPerTopic,
+        aiProvider: providerMode,
+        aiTimeoutMs: args.timeoutMs,
       });
     }
   } catch (err: unknown) {
