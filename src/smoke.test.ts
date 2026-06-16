@@ -40,6 +40,15 @@ import {
   parseRunnerArgs,
 } from './runners.ts';
 import { etld1 } from './fact-extractor.ts';
+import {
+  createFactCandidateProvider,
+  isFactExtractionProviderMode,
+} from './fact-providers.ts';
+import type {
+  FactCandidateRequest,
+  FactCandidateProvider,
+  FactExtractionProviderMode,
+} from './fact-providers.ts';
 
 // ---------------------------------------------------------------------------
 // Contracts
@@ -61,8 +70,8 @@ describe('contracts', () => {
     assert.ok(FORBIDDEN_METRIC_KEY_FRAGMENTS.includes('token'));
   });
 
-  test('CONTRACT_REVISION is 3 (rev 3: ExtractedFact, SourceDocument, visual blocks)', () => {
-    assert.equal(CONTRACT_REVISION, 3);
+  test('CONTRACT_REVISION includes rev 3 ETL fields and Hermes provider metadata', () => {
+    assert.equal(CONTRACT_REVISION, 5);
   });
 
   test('assertCompatibleArtifact: accepts valid aggregation envelope (rev 3)', () => {
@@ -516,17 +525,18 @@ describe('index (offline)', () => {
 // ---------------------------------------------------------------------------
 
 describe('A1: uncapped ingestion', () => {
-  test('CONTRACT_REVISION_V3 is 3 (re-exported from @ardurai/contracts)', () => {
-    assert.equal(CONTRACT_REVISION_V3, 3);
+  test('CONTRACT_REVISION_V3 bridge follows the current shared contract revision', () => {
+    assert.equal(CONTRACT_REVISION_V3, CONTRACT_REVISION);
+    assert.equal(CONTRACT_REVISION_V3, 5);
   });
 
-  test('CONTRACT_REVISION from @ardurai/contracts is now 3', () => {
-    assert.equal(CONTRACT_REVISION, 3);
+  test('CONTRACT_REVISION from @ardurai/contracts is now 5', () => {
+    assert.equal(CONTRACT_REVISION, 5);
   });
 
   test('index re-exports CONTRACT_REVISION_V3', async () => {
     const mod = await import('./index.ts');
-    assert.equal((mod as { CONTRACT_REVISION_V3?: unknown }).CONTRACT_REVISION_V3, 3);
+    assert.equal((mod as { CONTRACT_REVISION_V3?: unknown }).CONTRACT_REVISION_V3, 5);
   });
 });
 
@@ -895,6 +905,305 @@ describe('#18: deterministic fact ids', () => {
     for (const fact of result.facts) {
       assert.match(fact.id, /^[0-9a-f]{32}$/, `fact.id "${fact.id}" should be 32 hex chars`);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #35 — Hermes provider stays below aggregator-owned provenance/safety
+// ---------------------------------------------------------------------------
+
+describe('#35: Hermes fact extraction provider wiring', () => {
+  function makePair(docId: string, url: string, body: string): { doc: FullSourceDocument; body: string } {
+    return {
+      doc: {
+        id: docId,
+        url,
+        source: 'test',
+        sourceDomain: new URL(url).hostname,
+        tier: 'news',
+        title: 'Hermes Provider Test Article',
+        publishedAt: '2026-06-11T00:00:00Z',
+        fetchedAt: '2026-06-11T00:00:00Z',
+        extraction: 'full',
+        accessPolicy: 'allowed',
+        wordCount: 100,
+        lang: 'en',
+        contentHash: 'abc',
+      },
+      body,
+    };
+  }
+
+  const BODY = 'Anthropic released Claude 4 with 1 trillion parameters in June 2026. '
+    + 'The model achieved 95% accuracy on standard benchmarks. '
+    + 'OpenAI responded by announcing GPT-5 for Q3 2026. '
+    + 'Google Gemini 2.0 also launched at the same conference. '
+    + 'Microsoft published AKS automation guidance for Kubernetes operators.';
+  const NOW = new Date('2026-06-11T06:00:00.000Z');
+
+  function fakeProvider(
+    mode: FactExtractionProviderMode,
+    candidateJson: unknown,
+  ): FactCandidateProvider {
+    return {
+      mode,
+      model: `${mode}-test-model`,
+      async extractCandidates(request: FactCandidateRequest) {
+        assert.equal(request.providerMode, mode);
+        return {
+          ok: true,
+          provider: mode,
+          model: `${mode}-test-model`,
+          candidateJson,
+          rawText: JSON.stringify(candidateJson),
+          durationMs: 1,
+          attempts: 1,
+        };
+      },
+    };
+  }
+
+  test('extractFacts: successful Hermes candidates become aggregator-owned facts', async () => {
+    const pair = makePair('a'.repeat(40), 'https://example.com/hermes-a', BODY);
+    const result = await extractFacts([pair], 'ai', 'cluster-hermes', NOW, {
+      providerMode: 'hermes',
+      createProvider: (mode) => fakeProvider(mode, {
+        facts: [{
+          id: 'provider-must-not-win',
+          statement: 'Anthropic released Claude 4 with a large model family.',
+          entities: ['Anthropic'],
+          provenance: [{ sourceDocId: 'evil' }],
+          extractedBy: { provider: 'openai', model: 'evil', status: 'generated' },
+          corroboration: 999,
+          confidence: 'high',
+        }],
+      }),
+    });
+
+    assert.equal(result.provider.provider, 'hermes');
+    assert.equal(result.provider.model, 'hermes-test-model');
+    assert.equal(result.provider.status, 'generated');
+    assert.equal(result.facts.length, 1);
+    const fact = result.facts[0]!;
+    assert.notEqual(fact.id, 'provider-must-not-win');
+    assert.match(fact.id, /^[0-9a-f]{32}$/);
+    assert.deepEqual(fact.provenance, [{
+      sourceDocId: pair.doc.id,
+      sourceDomain: 'example.com',
+      url: 'https://example.com/hermes-a',
+    }]);
+    assert.deepEqual(fact.extractedBy, result.provider);
+    assert.equal(fact.corroboration, 1);
+  });
+
+  test('extractFacts: bad Hermes output falls back deterministically with a Hermes warning', async () => {
+    const pair = makePair('b'.repeat(40), 'https://example.com/hermes-b', BODY);
+    const result = await extractFacts([pair], 'ai', 'cluster-hermes-fallback', NOW, {
+      providerMode: 'hermes',
+      createProvider: (mode) => fakeProvider(mode, { facts: [{ id: 'missing-statement' }] }),
+    });
+
+    assert.equal(result.provider.provider, 'deterministic');
+    assert.equal(result.provider.status, 'fallback');
+    assert.equal(result.provider.reason, 'hermes-returned-empty');
+    assert.ok(result.facts.length > 0, 'deterministic fallback should preserve fact coverage');
+    assert.ok(result.warnings.some((warning) => /Hermes.*falling back/i.test(warning)));
+  });
+
+  test('extractFacts: ARDUR_AI_ENABLED=0 forces deterministic and skips external provider creation', async () => {
+    const previous = process.env['ARDUR_AI_ENABLED'];
+    process.env['ARDUR_AI_ENABLED'] = '0';
+    try {
+      const pair = makePair('c'.repeat(40), 'https://example.com/hermes-c', BODY);
+      const result = await extractFacts([pair], 'ai', 'cluster-hermes-disabled', NOW, {
+        providerMode: 'hermes',
+        createProvider: () => {
+          throw new Error('external provider should not be created when ARDUR_AI_ENABLED=0');
+        },
+      });
+      assert.equal(result.provider.provider, 'deterministic');
+      assert.equal(result.provider.reason, 'ai-disabled');
+    } finally {
+      if (previous === undefined) {
+        delete process.env['ARDUR_AI_ENABLED'];
+      } else {
+        process.env['ARDUR_AI_ENABLED'] = previous;
+      }
+    }
+  });
+
+  test('buildDescribeOutput: provider enum includes hermes', () => {
+    const describeOutput = buildDescribeOutput();
+    const providerFlag = describeOutput.flags['--provider'] as { enum?: string[] };
+    assert.deepEqual(providerFlag.enum, ['deterministic', 'ollama', 'openai', 'hermes']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// HERMES-AI-003 — fact extraction provider adapters
+// ---------------------------------------------------------------------------
+
+describe('fact-providers: adapter contract', () => {
+  const NOW_ISO = '2026-06-11T06:00:00.000Z';
+  const BODY = 'Anthropic released Claude 4 with 1 trillion parameters in June 2026. '
+    + 'The model achieved 95% accuracy on standard benchmarks. '
+    + 'OpenAI responded by announcing GPT-5 for Q3 2026. '
+    + 'Google Gemini 2.0 also launched at the same conference.';
+
+  function makeProviderRequest(providerMode: FactCandidateRequest['providerMode']): FactCandidateRequest {
+    return {
+      contractVersion: 'fact-candidate/v1',
+      providerMode,
+      topic: 'ai',
+      clusterId: 'cluster-provider',
+      nowIso: NOW_ISO,
+      source: {
+        id: 'e'.repeat(40),
+        title: 'Provider adapter test article',
+        sourceDomain: 'example.com',
+        url: 'https://example.com/provider-test',
+        extraction: 'full',
+        accessPolicy: 'allowed',
+        contentHash: 'abc123',
+      },
+      body: BODY,
+      prompt: 'Extract candidate facts as JSON only.',
+      responseSchema: { type: 'object', required: ['facts'] },
+      timeoutMs: 1_000,
+      maxOutputTokens: 256,
+    };
+  }
+
+  test('provider mode guard includes deterministic, ollama, openai, and hermes', () => {
+    assert.ok(isFactExtractionProviderMode('deterministic'));
+    assert.ok(isFactExtractionProviderMode('ollama'));
+    assert.ok(isFactExtractionProviderMode('openai'));
+    assert.ok(isFactExtractionProviderMode('hermes'));
+    assert.equal(isFactExtractionProviderMode('bogus'), false);
+  });
+
+  test('deterministic provider returns candidate fact JSON only', async () => {
+    const provider = createFactCandidateProvider('deterministic');
+    const outcome = await provider.extractCandidates(makeProviderRequest('deterministic'));
+
+    assert.equal(outcome.ok, true);
+    if (!outcome.ok) return;
+
+    const payload = outcome.candidateJson as { facts?: Array<Record<string, unknown>> };
+    assert.ok(Array.isArray(payload.facts));
+    assert.ok(payload.facts.length > 0, 'deterministic provider should produce fallback candidates');
+    const fact = payload.facts[0]!;
+    assert.equal(typeof fact.statement, 'string');
+    assert.ok(!('id' in fact), 'providers must not create ExtractedFact ids');
+    assert.ok(!('provenance' in fact), 'providers must not attach provenance');
+    assert.ok(!('extractedBy' in fact), 'providers must not attach provider metadata to candidates');
+  });
+
+  test('ollama provider posts the shared prompt/schema through injected fetch', async () => {
+    const calls: Array<{ input: Parameters<typeof fetch>[0]; init: Parameters<typeof fetch>[1] | undefined }> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      calls.push({ input, init });
+      return new Response(
+        JSON.stringify({
+          response: JSON.stringify({
+            facts: [{ statement: 'Anthropic released Claude 4.', entities: ['Anthropic'], confidence: 'high' }],
+          }),
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    };
+
+    const request = makeProviderRequest('ollama');
+    const provider = createFactCandidateProvider('ollama', {
+      fetchImpl,
+      ollamaHost: 'http://ollama.local/',
+      ollamaModel: 'test-ollama-model',
+      maxOutputTokens: 123,
+    });
+    const outcome = await provider.extractCandidates(request);
+
+    assert.equal(outcome.ok, true);
+    if (!outcome.ok) return;
+    assert.equal(outcome.provider, 'ollama');
+    assert.equal(outcome.model, 'test-ollama-model');
+    assert.deepEqual((outcome.candidateJson as { facts: unknown[] }).facts, [
+      { statement: 'Anthropic released Claude 4.', entities: ['Anthropic'], confidence: 'high' },
+    ]);
+    assert.equal(calls.length, 1);
+    assert.equal(String(calls[0]!.input), 'http://ollama.local/api/generate');
+    const requestBody = JSON.parse(String(calls[0]!.init!.body)) as Record<string, unknown>;
+    assert.equal(requestBody['prompt'], request.prompt);
+    assert.deepEqual(requestBody['format'], request.responseSchema);
+    assert.deepEqual(requestBody['options'], { temperature: 0.1, num_predict: 123 });
+  });
+
+  test('openai provider maps model text output to the same candidate JSON contract', async () => {
+    const calls: Array<{ input: Parameters<typeof fetch>[0]; init: Parameters<typeof fetch>[1] | undefined }> = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      calls.push({ input, init });
+      return new Response(
+        JSON.stringify({ output_text: '{"facts":[{"statement":"OpenAI returned candidate JSON.","entities":["OpenAI"]}]}' }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    };
+
+    const provider = createFactCandidateProvider('openai', {
+      fetchImpl,
+      openaiApiKey: 'test-key',
+      openaiModel: 'gpt-test',
+    });
+    const outcome = await provider.extractCandidates(makeProviderRequest('openai'));
+
+    assert.equal(outcome.ok, true);
+    if (!outcome.ok) return;
+    assert.equal(outcome.provider, 'openai');
+    assert.deepEqual((outcome.candidateJson as { facts: unknown[] }).facts, [
+      { statement: 'OpenAI returned candidate JSON.', entities: ['OpenAI'] },
+    ]);
+    assert.equal(calls.length, 1);
+    assert.equal(String(calls[0]!.input), 'https://api.openai.com/v1/responses');
+    assert.equal((calls[0]!.init!.headers as Record<string, string>)['authorization'], 'Bearer test-key');
+  });
+
+  test('hermes provider parses command output as candidate JSON only', async () => {
+    const provider = createFactCandidateProvider('hermes', {
+      hermesCommandRunner: async ({ prompt, timeoutMs }) => {
+        assert.ok(prompt.includes('Return only JSON'));
+        assert.equal(timeoutMs, 1_000);
+        return {
+          stdout: '{"facts":[{"statement":"Hermes returned candidate JSON.","entities":["Hermes"],"confidence":"medium"}]}',
+          stderr: '',
+          exitCode: 0,
+        };
+      },
+    });
+    const outcome = await provider.extractCandidates(makeProviderRequest('hermes'));
+
+    assert.equal(outcome.ok, true);
+    if (!outcome.ok) return;
+    assert.equal(outcome.provider, 'hermes');
+    assert.deepEqual((outcome.candidateJson as { facts: unknown[] }).facts, [
+      { statement: 'Hermes returned candidate JSON.', entities: ['Hermes'], confidence: 'medium' },
+    ]);
+  });
+
+  test('hermes provider failure messages do not echo raw stderr', async () => {
+    const provider = createFactCandidateProvider('hermes', {
+      hermesCommandRunner: async () => ({
+        stdout: '',
+        stderr: 'RAW PROMPT secret-token completion text',
+        exitCode: 2,
+      }),
+    });
+    const outcome = await provider.extractCandidates(makeProviderRequest('hermes'));
+
+    assert.equal(outcome.ok, false);
+    if (outcome.ok) return;
+    assert.equal(outcome.errorKind, 'bad_response');
+    assert.match(outcome.message, /exit code 2/);
+    assert.ok(!outcome.message.includes('RAW PROMPT'));
+    assert.ok(!outcome.message.includes('secret-token'));
+    assert.ok(!outcome.message.includes('completion text'));
   });
 });
 

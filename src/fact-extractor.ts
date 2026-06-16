@@ -20,13 +20,17 @@ import type { SourceDocument, ExtractedFact, FactProvenance } from './contracts-
 import type { ProviderMeta, Confidence } from '@ardurai/contracts';
 import { validateFactsForWire, hasForbiddenVerbatimOverlap, wordCount } from './copyright-guard.ts';
 import { ExtractedFactSchema } from '@ardurai/contracts/zod';
-
-// ── Environment config ───────────────────────────────────────────────────────
-
-const OLLAMA_HOST = process.env['OLLAMA_HOST'] ?? 'http://localhost:11434';
-const OLLAMA_MODEL = process.env['OLLAMA_MODEL'] ?? 'llama3.1:8b';
-const OLLAMA_API_KEY = process.env['OLLAMA_API_KEY'];
-const OLLAMA_TIMEOUT_MS = Number(process.env['OLLAMA_TIMEOUT_MS'] ?? '60000');
+import {
+  createFactCandidateProvider,
+  isAiProviderEnabled,
+  resolveFactExtractionProviderMode,
+} from './fact-providers.ts';
+import type {
+  FactCandidateProvider,
+  FactExtractionProviderMode,
+  FactProviderConfig,
+  FactProviderFailure,
+} from './fact-providers.ts';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -41,18 +45,23 @@ export interface FactExtractionResult {
   warnings: string[];
 }
 
-// JSON schema shape expected from Ollama
+export interface FactExtractionOptions {
+  providerMode?: FactExtractionProviderMode | string;
+  providerConfig?: FactProviderConfig;
+  createProvider?: (mode: FactExtractionProviderMode) => FactCandidateProvider;
+  timeoutMs?: number;
+  maxOutputTokens?: number;
+}
+
+// Aggregator-owned candidate shape after provider JSON parsing. Providers may
+// return structurally surprising JSON, so every field remains unknown until the
+// aggregator normalizes it into ExtractedFact.
 interface RawFactFromLlm {
-  statement: string;
-  entities?: string[];
-  quantity?: {
-    metric: string;
-    value: number;
-    unit?: string;
-    asOf?: string;
-  };
-  quote?: string;
-  confidence?: string;
+  statement?: unknown;
+  entities?: unknown;
+  quantity?: unknown;
+  quote?: unknown;
+  confidence?: unknown;
 }
 
 // ── Deterministic fact id ────────────────────────────────────────────────────
@@ -66,39 +75,6 @@ function factIdFrom(clusterId: string, statement: string, primaryDocId: string):
     .update(`${clusterId}|${statement}|${primaryDocId}`)
     .digest('hex')
     .slice(0, 32);
-}
-
-// ── Ollama client ────────────────────────────────────────────────────────────
-
-async function ollamaGenerate(prompt: string, schema: object): Promise<string | null> {
-  const endpoint = `${OLLAMA_HOST.replace(/\/$/, '')}/api/generate`;
-
-  const headers: Record<string, string> = {
-    'content-type': 'application/json',
-  };
-  if (OLLAMA_API_KEY) headers['authorization'] = `Bearer ${OLLAMA_API_KEY}`;
-
-  try {
-    const resp = await fetch(endpoint, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        model: OLLAMA_MODEL,
-        prompt,
-        format: schema,
-        stream: false,
-        options: { temperature: 0.1, num_predict: 2048 },
-      }),
-      signal: AbortSignal.timeout(OLLAMA_TIMEOUT_MS),
-    });
-
-    if (!resp.ok) return null;
-
-    const data = (await resp.json()) as { response?: string };
-    return data.response ?? null;
-  } catch {
-    return null;
-  }
 }
 
 // ── LLM extraction ───────────────────────────────────────────────────────────
@@ -154,44 +130,111 @@ ${truncated}
 Return JSON matching the schema.`;
 }
 
-async function extractWithLlm(
+function rawFactsFromCandidatePayload(payload: unknown): RawFactFromLlm[] {
+  if (!payload || typeof payload !== 'object') return [];
+  const facts = (payload as { facts?: unknown })['facts'];
+  if (!Array.isArray(facts)) return [];
+  return facts.filter((fact): fact is RawFactFromLlm => fact !== null && typeof fact === 'object');
+}
+
+function normalizeRawQuantity(quantity: unknown): {
+  metric: string;
+  value: number;
+  unit?: string;
+  asOf?: string;
+} | undefined {
+  if (!quantity || typeof quantity !== 'object') return undefined;
+  const q = quantity as Record<string, unknown>;
+  if (typeof q['metric'] !== 'string' || typeof q['value'] !== 'number') return undefined;
+  const normalized: { metric: string; value: number; unit?: string; asOf?: string } = {
+    metric: q['metric'],
+    value: q['value'],
+  };
+  if (typeof q['unit'] === 'string') normalized.unit = q['unit'];
+  if (typeof q['asOf'] === 'string') normalized.asOf = q['asOf'];
+  return normalized;
+}
+
+interface AiExtractionAttempt {
+  facts: Omit<ExtractedFact, 'corroboration'>[];
+  providerMeta: ProviderMeta;
+  providerMode: FactExtractionProviderMode;
+  warnings: string[];
+  failures: FactProviderFailure[];
+}
+
+function providerDisplayName(mode: FactExtractionProviderMode): string {
+  return mode === 'openai' ? 'OpenAI' : mode.charAt(0).toUpperCase() + mode.slice(1);
+}
+
+async function extractWithAiProvider(
   pairs: SourceBodyPair[],
   topic: string,
   clusterId: string,
   now: Date,
-): Promise<{ facts: Omit<ExtractedFact, 'corroboration'>[]; providerMeta: ProviderMeta } | null> {
+  providerMode: FactExtractionProviderMode,
+  options: FactExtractionOptions,
+): Promise<AiExtractionAttempt> {
   const generatedAt = now.toISOString();
+  const provider = options.createProvider?.(providerMode)
+    ?? createFactCandidateProvider(providerMode, options.providerConfig);
+  let providerModel = provider.model;
+  const warnings: string[] = [];
+  const failures: FactProviderFailure[] = [];
 
-  // Batch: extract from each source independently, then cross-reference for corroboration
+  // Batch: extract from each source independently, then cross-reference for corroboration.
+  // The provider returns candidate JSON only; the aggregator below still owns
+  // provenance, ids, corroboration, Zod validation, copyright, and fallback.
   const perSourceFacts: Map<string, RawFactFromLlm[]> = new Map();
 
   for (const { doc, body } of pairs) {
     if (!body || body.length < 100) continue;
     const prompt = buildExtractionPrompt(body, doc.title, topic);
-    const raw = await ollamaGenerate(prompt, EXTRACTION_SCHEMA);
-    if (!raw) continue;
+    const outcome = await provider.extractCandidates({
+      contractVersion: 'fact-candidate/v1',
+      providerMode,
+      topic,
+      clusterId,
+      nowIso: generatedAt,
+      source: {
+        id: doc.id,
+        title: doc.title,
+        sourceDomain: doc.sourceDomain,
+        url: doc.url,
+        extraction: doc.extraction,
+        accessPolicy: doc.accessPolicy,
+        contentHash: doc.contentHash,
+      },
+      body,
+      prompt,
+      responseSchema: EXTRACTION_SCHEMA,
+      timeoutMs: options.timeoutMs ?? 60_000,
+      maxOutputTokens: options.maxOutputTokens ?? 2_048,
+    });
 
-    try {
-      const parsed = JSON.parse(raw) as { facts?: RawFactFromLlm[] };
-      const rawFacts = parsed.facts ?? [];
-      perSourceFacts.set(doc.id, rawFacts);
-    } catch {
-      // malformed JSON — skip this source
+    if (!outcome.ok) {
+      failures.push(outcome);
+      warnings.push(`${providerDisplayName(providerMode)} provider ${outcome.errorKind}: ${outcome.message}`);
+      continue;
     }
+    providerModel = outcome.model;
+    const rawFacts = rawFactsFromCandidatePayload(outcome.candidateJson);
+    if (rawFacts.length === 0) {
+      warnings.push(`${providerDisplayName(providerMode)} provider returned no usable candidate facts for ${doc.id}`);
+    }
+    perSourceFacts.set(doc.id, rawFacts);
   }
 
-  if (perSourceFacts.size === 0) return null;
-
   const providerMeta: ProviderMeta = {
-    provider: 'ollama',
-    model: OLLAMA_MODEL,
+    provider: providerMode,
+    model: providerModel,
     status: 'generated',
     generatedAt,
   };
 
   const docById = new Map(pairs.map((p) => [p.doc.id, p.doc]));
 
-  // Build facts with provenance from the source that produced them
+  // Build facts with provenance from the source that produced them.
   const results: Omit<ExtractedFact, 'corroboration'>[] = [];
 
   for (const [docId, rawFacts] of perSourceFacts) {
@@ -199,11 +242,12 @@ async function extractWithLlm(
     if (!doc) continue;
 
     for (const rawFact of rawFacts) {
-      if (!rawFact.statement || rawFact.statement.length < 10) continue;
+      const statement = rawFact.statement;
+      if (typeof statement !== 'string' || statement.length < 10) continue;
 
-      // Screen verbatim overlap with the source body
+      // Screen verbatim overlap with the source body.
       const sourcePair = pairs.find((p) => p.doc.id === docId);
-      if (sourcePair && hasForbiddenVerbatimOverlap(rawFact.statement, sourcePair.body)) {
+      if (sourcePair && hasForbiddenVerbatimOverlap(statement, sourcePair.body)) {
         continue; // statement too verbatim — skip
       }
 
@@ -213,17 +257,17 @@ async function extractWithLlm(
         url: doc.url,
       };
 
-      if (rawFact.quote) {
+      if (typeof rawFact.quote === 'string') {
         const qWords = wordCount(rawFact.quote);
         if (qWords <= 25) {
           prov.quote = rawFact.quote;
         }
-        // If over 25 words, omit the quote (don't truncate LLM quotes — they should be precise)
+        // If over 25 words, omit the quote (don't truncate LLM quotes — they should be precise).
       }
 
-      const entities = (rawFact.entities ?? []).filter(
-        (e): e is string => typeof e === 'string' && e.length > 0,
-      );
+      const entities = Array.isArray(rawFact.entities)
+        ? rawFact.entities.filter((e): e is string => typeof e === 'string' && e.length > 0)
+        : [];
       const confidence: Confidence = rawFact.confidence === 'high'
         ? 'high'
         : rawFact.confidence === 'low'
@@ -231,32 +275,26 @@ async function extractWithLlm(
           : 'medium';
 
       const fact: Omit<ExtractedFact, 'corroboration'> = {
-        id: factIdFrom(clusterId, rawFact.statement, docId),
+        id: factIdFrom(clusterId, statement, docId),
         topic,
         clusterId,
-        statement: rawFact.statement,
+        statement,
         entities,
         provenance: [prov],
         confidence,
         extractedBy: providerMeta,
       };
 
-      if (rawFact.quantity &&
-          typeof rawFact.quantity.metric === 'string' &&
-          typeof rawFact.quantity.value === 'number') {
-        fact.quantity = {
-          metric: rawFact.quantity.metric,
-          value: rawFact.quantity.value,
-          ...(rawFact.quantity.unit !== undefined ? { unit: rawFact.quantity.unit } : {}),
-          ...(rawFact.quantity.asOf !== undefined ? { asOf: rawFact.quantity.asOf } : {}),
-        };
+      const quantity = normalizeRawQuantity(rawFact.quantity);
+      if (quantity !== undefined) {
+        fact.quantity = quantity;
       }
 
       results.push(fact);
     }
   }
 
-  return { facts: results, providerMeta };
+  return { facts: results, providerMeta, providerMode, warnings, failures };
 }
 
 // ── Deterministic floor ───────────────────────────────────────────────────────
@@ -456,6 +494,7 @@ export async function extractFacts(
   topic: string,
   clusterId: string,
   now: Date,
+  options: FactExtractionOptions = {},
 ): Promise<FactExtractionResult> {
   const warnings: string[] = [];
   const activePairs = pairs.filter((p) => p.body && p.body.length >= 100);
@@ -474,29 +513,18 @@ export async function extractFacts(
     };
   }
 
-  // Try AI-primary
-  const llmResult = await extractWithLlm(activePairs, topic, clusterId, now);
+  const selectedProvider = resolveFactExtractionProviderMode(options.providerMode);
+  const aiDisabled = !isAiProviderEnabled();
 
-  let rawFacts: Omit<ExtractedFact, 'corroboration'>[];
-  let provider: ProviderMeta;
-
-  if (llmResult && llmResult.facts.length > 0) {
-    rawFacts = llmResult.facts;
-    provider = llmResult.providerMeta;
-  } else {
-    // Deterministic floor
-    if (llmResult === null) {
-      warnings.push('Ollama unavailable — falling back to deterministic extraction');
-    } else {
-      warnings.push('Ollama returned no facts — falling back to deterministic extraction');
-    }
+  const runDeterministicFloor = (reason: string, extraWarnings: string[]): FactExtractionResult => {
+    warnings.push(...extraWarnings);
 
     const detFacts: ExtractedFact[] = [];
     for (const pair of activePairs) {
       detFacts.push(...deterministicExtract(pair.doc, pair.body, topic, clusterId, now));
     }
 
-    // Deterministic facts already have corroboration=1; re-compute after merging
+    // Deterministic facts already have corroboration=1; re-compute after merging.
     const allDocs = activePairs.map((p) => p.doc);
     const withCorroboration = computeCorroboration(
       detFacts.map(({ corroboration: _c, ...rest }) => rest),
@@ -512,11 +540,38 @@ export async function extractFacts(
         provider: 'deterministic',
         model: 'regex-v1',
         status: 'fallback',
-        reason: llmResult === null ? 'ollama-unavailable' : 'llm-returned-empty',
+        reason,
         generatedAt: now.toISOString(),
       },
       warnings,
     };
+  };
+
+  if (selectedProvider === 'deterministic') {
+    return runDeterministicFloor(
+      aiDisabled ? 'ai-disabled' : 'deterministic-selected',
+      aiDisabled ? ['ARDUR_AI_ENABLED=0 — deterministic extraction forced; no external provider called'] : [],
+    );
+  }
+
+  // Try AI-primary provider selected by options/env.
+  const aiAttempt = await extractWithAiProvider(activePairs, topic, clusterId, now, selectedProvider, options);
+  warnings.push(...aiAttempt.warnings);
+
+  let rawFacts: Omit<ExtractedFact, 'corroboration'>[];
+  let provider: ProviderMeta;
+
+  if (aiAttempt.facts.length > 0) {
+    rawFacts = aiAttempt.facts;
+    provider = aiAttempt.providerMeta;
+  } else {
+    const reason = aiAttempt.failures.length > 0
+      ? `${selectedProvider}-unavailable`
+      : `${selectedProvider}-returned-empty`;
+    const label = providerDisplayName(selectedProvider);
+    return runDeterministicFloor(reason, [
+      `${label} returned no usable facts — falling back to deterministic extraction`,
+    ]);
   }
 
   const allDocs = activePairs.map((p) => p.doc);

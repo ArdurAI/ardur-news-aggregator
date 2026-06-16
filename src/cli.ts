@@ -12,6 +12,7 @@
 import { writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { runAggregation } from './index.ts';
+import { isFactExtractionProviderMode, resolveFactExtractionProviderMode } from './fact-providers.ts';
 import type { SourceDocument, ExtractedFact } from '@ardurai/contracts';
 
 function parseArgs(): {
@@ -21,6 +22,7 @@ function parseArgs(): {
   concurrency: number;
   etlEnabled: boolean;
   etlFetchBudgetPerTopic: number;
+  provider: string;
 } {
   const args = process.argv.slice(2);
   let outPath: string | null = null;
@@ -29,6 +31,7 @@ function parseArgs(): {
   let concurrency = 10;
   let etlEnabled = process.env['ARDUR_ETL_ENABLED'] === 'true';
   let etlFetchBudgetPerTopic = 30;
+  let provider = process.env['ARDUR_AI_PROVIDER'] ?? 'deterministic';
 
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -38,14 +41,20 @@ function parseArgs(): {
     else if (a === '--concurrency' && args[i + 1]) { concurrency = Number(args[++i]) || 10; }
     else if (a === '--etl') { etlEnabled = true; }
     else if (a === '--etl-budget' && args[i + 1]) { etlFetchBudgetPerTopic = Number(args[++i]) || 30; }
+    else if (a === '--provider' && args[i + 1]) { provider = args[++i] ?? provider; }
   }
-  return { outPath, maxAgeHours, timeoutMs, concurrency, etlEnabled, etlFetchBudgetPerTopic };
+  return { outPath, maxAgeHours, timeoutMs, concurrency, etlEnabled, etlFetchBudgetPerTopic, provider };
 }
 
 async function main(): Promise<void> {
-  const { outPath, maxAgeHours, timeoutMs, concurrency, etlEnabled, etlFetchBudgetPerTopic } =
+  const { outPath, maxAgeHours, timeoutMs, concurrency, etlEnabled, etlFetchBudgetPerTopic, provider } =
     parseArgs();
   const now = new Date();
+
+  if (!isFactExtractionProviderMode(provider)) {
+    throw new Error(`--provider must be one of deterministic, ollama, openai, hermes; got "${provider}"`);
+  }
+  const providerMode = resolveFactExtractionProviderMode(provider);
 
   process.stderr.write(`[ardur-news-aggregator] starting cycle at ${now.toISOString()}\n`);
   process.stderr.write(
@@ -60,6 +69,8 @@ async function main(): Promise<void> {
     concurrency,
     etlEnabled,
     etlFetchBudgetPerTopic,
+    aiProvider: providerMode,
+    aiTimeoutMs: timeoutMs,
   });
 
   const topicIds = Object.keys(artifact.data.itemsByTopic).filter((t) => t !== 'all');

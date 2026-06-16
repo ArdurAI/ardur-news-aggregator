@@ -61,6 +61,27 @@ sequenceDiagram
   Ag-->>O: AggregationArtifact
 ```
 
+### AI fact extraction provider boundary
+
+Fact extraction is explicit and cost-guarded. The default provider is
+`deterministic`; `ARDUR_AI_PROVIDER` / `--provider` may select
+`deterministic | ollama | openai | hermes` when ETL is enabled.
+`ARDUR_AI_ENABLED=0` is a hard kill switch that forces deterministic extraction
+and prevents provider creation.
+
+Providers return candidate JSON only. The aggregator still owns:
+
+- content-derived fact IDs
+- source provenance and quote-length enforcement
+- corroboration computation
+- shared Zod validation and `ProviderMeta` stamping
+- copyright/verbatim gates
+- deterministic fallback on timeout, malformed JSON, non-zero command exit, or empty candidate sets
+
+Hermes is currently a CLI adapter (`HERMES_FACT_EXTRACT_COMMAND`,
+`HERMES_FACT_EXTRACT_ARGS`, `HERMES_FACT_EXTRACT_MODEL`) and is never called by
+default CI tests; test coverage uses injected fake runners.
+
 ## 3. Data schemas + metadata fields
 
 Authoritative types live in [`../src/contracts.ts`](../src/contracts.ts).
