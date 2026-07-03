@@ -61,8 +61,8 @@ describe('contracts', () => {
     assert.ok(FORBIDDEN_METRIC_KEY_FRAGMENTS.includes('token'));
   });
 
-  test('CONTRACT_REVISION is 3 (rev 3: ExtractedFact, SourceDocument, visual blocks)', () => {
-    assert.equal(CONTRACT_REVISION, 3);
+  test('CONTRACT_REVISION is 5 (rev 5: Hermes provider; rev 4: signalId/summary; rev 3: ExtractedFact, SourceDocument)', () => {
+    assert.equal(CONTRACT_REVISION, 5);
   });
 
   test('assertCompatibleArtifact: accepts valid aggregation envelope (rev 3)', () => {
@@ -516,17 +516,20 @@ describe('index (offline)', () => {
 // ---------------------------------------------------------------------------
 
 describe('A1: uncapped ingestion', () => {
-  test('CONTRACT_REVISION_V3 is 3 (re-exported from @ardurai/contracts)', () => {
-    assert.equal(CONTRACT_REVISION_V3, 3);
+  test('CONTRACT_REVISION_V3 tracks current revision (re-exported from @ardurai/contracts)', () => {
+    // CONTRACT_REVISION_V3 is an alias for the current CONTRACT_REVISION.
+    // It was named V3 when rev 3 was the latest; the name is kept for compat
+    // but the value tracks the current revision.
+    assert.equal(CONTRACT_REVISION_V3, CONTRACT_REVISION);
   });
 
-  test('CONTRACT_REVISION from @ardurai/contracts is now 3', () => {
-    assert.equal(CONTRACT_REVISION, 3);
+  test('CONTRACT_REVISION from @ardurai/contracts is 5', () => {
+    assert.equal(CONTRACT_REVISION, 5);
   });
 
   test('index re-exports CONTRACT_REVISION_V3', async () => {
     const mod = await import('./index.ts');
-    assert.equal((mod as { CONTRACT_REVISION_V3?: unknown }).CONTRACT_REVISION_V3, 3);
+    assert.equal((mod as { CONTRACT_REVISION_V3?: unknown }).CONTRACT_REVISION_V3, 5);
   });
 });
 

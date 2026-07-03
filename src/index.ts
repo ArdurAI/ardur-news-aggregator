@@ -31,6 +31,7 @@ import {
   CYCLE_INTERVAL_MS,
   CONTRACT_REVISION,
   assertCompatibleArtifact,
+  normalizeToIsoDatetime,
 } from '@ardurai/contracts';
 import { CONTRACT_REVISION_V3 } from './contracts-v3.ts';
 import { loadTopics, sourcesForTopic, loadSources } from './sources.ts';
@@ -454,12 +455,7 @@ export async function runAggregation(options: AggregationOptions = {}): Promise<
     // (e.g. RFC 2822 from a feed we didn't catch). The Zod schema in contracts
     // requires strict ISO 8601 datetime; a single bad date poisons the whole artifact.
     for (const item of allItems) {
-      const parsed = new Date(item.publishedAt);
-      if (Number.isFinite(parsed.valueOf())) {
-        item.publishedAt = parsed.toISOString();
-      } else {
-        item.publishedAt = now.toISOString();
-      }
+      item.publishedAt = normalizeToIsoDatetime(item.publishedAt, now.toISOString());
     }
 
     // Dedup (A1: keep all — no ceiling; dedup only removes true duplicates)

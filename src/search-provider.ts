@@ -11,7 +11,7 @@
 
 import { XMLParser } from 'fast-xml-parser';
 import { assertAllowedFetchUrl, readBoundedText, normalizePublicUrl, GOOGLE_NEWS_FETCH_HOSTS } from './source-safety.ts';
-import type { SourceTier } from '@ardurai/contracts';
+import { normalizeToIsoDatetime, type SourceTier } from '@ardurai/contracts';
 import { stripMarkup } from './util.ts';
 
 const SEARCH_USER_AGENT = 'ArdurAI/1.0 (+https://ardur.ai)';
@@ -140,12 +140,10 @@ export class GoogleNewsSearchProvider implements SearchProvider {
           domain,
         };
         // RSS pubDate is RFC 2822 (e.g. "Wed, 02 Jul 2025 14:30:00 GMT");
-        // normalize to ISO 8601 so downstream Zod validation passes.
+        // normalize to ISO 8601 via the shared contracts utility so downstream
+        // Zod validation passes.
         if (pubDate) {
-          const parsed = new Date(pubDate);
-          if (Number.isFinite(parsed.valueOf())) {
-            result.publishedAt = parsed.toISOString();
-          }
+          result.publishedAt = normalizeToIsoDatetime(pubDate);
         }
         if (sourceLabel) result.sourceLabel = sourceLabel;
         results.push(result);

@@ -37,7 +37,7 @@
     "url": "https://github.com/ArdurAI/ardur-news-aggregator.git"
   },
   "dependencies": {
-    "@ardurai/contracts": "github:ArdurAI/ardur-contracts#4667a8b",
+    "@ardurai/contracts": "github:ArdurAI/ardur-contracts#5fb07d32d476b86ee05175f37ff5d96d844754cf",
     "fast-xml-parser": "^5.8.0",
     "zod": "^3.25.76"
   },
