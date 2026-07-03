@@ -139,7 +139,14 @@ export class GoogleNewsSearchProvider implements SearchProvider {
           title: stripMarkup(rawTitle),
           domain,
         };
-        if (pubDate) result.publishedAt = pubDate;
+        // RSS pubDate is RFC 2822 (e.g. "Wed, 02 Jul 2025 14:30:00 GMT");
+        // normalize to ISO 8601 so downstream Zod validation passes.
+        if (pubDate) {
+          const parsed = new Date(pubDate);
+          if (Number.isFinite(parsed.valueOf())) {
+            result.publishedAt = parsed.toISOString();
+          }
+        }
         if (sourceLabel) result.sourceLabel = sourceLabel;
         results.push(result);
       }

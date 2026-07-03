@@ -450,6 +450,18 @@ export async function runAggregation(options: AggregationOptions = {}): Promise<
       }
     }
 
+    // Defensive: normalize any publishedAt that slipped through as a non-ISO string
+    // (e.g. RFC 2822 from a feed we didn't catch). The Zod schema in contracts
+    // requires strict ISO 8601 datetime; a single bad date poisons the whole artifact.
+    for (const item of allItems) {
+      const parsed = new Date(item.publishedAt);
+      if (Number.isFinite(parsed.valueOf())) {
+        item.publishedAt = parsed.toISOString();
+      } else {
+        item.publishedAt = now.toISOString();
+      }
+    }
+
     // Dedup (A1: keep all — no ceiling; dedup only removes true duplicates)
     const { items: dedupedItems, duplicatesRemoved } = dedupe(allItems);
     if (duplicatesRemoved > 0) {
