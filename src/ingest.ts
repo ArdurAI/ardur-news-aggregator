@@ -84,6 +84,10 @@ function truncate(text: string, maxChars: number): string {
 // Build the allowed hosts set for a given source
 function allowedHostsFor(source: SourceDefinition): Set<string> {
   const hosts = new Set([source.domain]);
+  // Also allow www. prefix variant — many feeds use www. while the catalog
+  // stores the bare domain. Without this, assertAllowedFetchUrl rejects the
+  // feed URL because the hostname doesn't match the allowlist.
+  if (!source.domain.startsWith('www.')) hosts.add(`www.${source.domain}`);
   for (const h of EXTRA_FEED_HOSTS) hosts.add(h);
   return hosts;
 }
