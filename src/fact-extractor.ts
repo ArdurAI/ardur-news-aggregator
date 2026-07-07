@@ -280,6 +280,24 @@ async function extractWithLlm(
 
 const NUMBER_WITH_UNIT_RE = /(\b\d[\d,.]*\s*(?:billion|million|thousand|trillion|%|percent|ms|GB|TB|MB|KB|K|B|M|T|x|×)\b)/gi;
 const NAMED_ENTITY_RE = /\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\b/g;
+const COMMON_CAPITALIZED = new Set([
+  'The', 'This', 'That', 'These', 'Those', 'With', 'Without', 'From',
+  'After', 'Before', 'During', 'While', 'When', 'Where', 'Which', 'What',
+  'Who', 'How', 'Why', 'And', 'But', 'For', 'Not', 'Are', 'Was', 'Were',
+  'Has', 'Have', 'Had', 'Can', 'Will', 'Would', 'Could', 'Should', 'May',
+  'Might', 'Must', 'Its', 'His', 'Her', 'Their', 'Our', 'Your', 'Some',
+  'Any', 'Each', 'Every', 'Both', 'Few', 'More', 'Most', 'Other', 'Such',
+  'Only', 'New', 'First', 'Last', 'Next', 'Same', 'Own', 'Just', 'Also',
+  'Still', 'Yet', 'Now', 'Then', 'Here', 'There', 'Very', 'Too', 'Much',
+  'Many', 'Into', 'Over', 'About', 'Like', 'Than', 'One', 'Two', 'Three',
+  'Today', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',
+  'Saturday', 'Sunday', 'January', 'February', 'March', 'April', 'May',
+  'June', 'July', 'August', 'September', 'October', 'November', 'December',
+  'Returning', 'Following', 'According', 'Including', 'During', 'Despite',
+  'Through', 'Between', 'Because', 'However', 'Although', 'Instead',
+  'Getting', 'Making', 'Taking', 'Using', 'Working', 'Looking', 'Coming',
+  'Going', 'Doing', 'Being', 'Having', 'Saying', 'Seeing', 'Thinking',
+]);
 const IMPORTANT_DOMAINS_RE = /\b(OpenAI|Anthropic|Google|Microsoft|Amazon|NVIDIA|Meta|Apple|Kubernetes|CNCF|GitHub)\b/gi;
 
 function deterministicExtract(
@@ -310,7 +328,8 @@ function deterministicExtract(
     const namedEntities: string[] = [];
     for (const match of sentence.matchAll(NAMED_ENTITY_RE)) {
       const e = (match[0] ?? '').trim();
-      if (e.length > 3 && !domainEntities.some((d) => d.toLowerCase() === e.toLowerCase())) {
+      if (e.length > 3 && !domainEntities.some((d) => d.toLowerCase() === e.toLowerCase())
+          && !COMMON_CAPITALIZED.has(e)) {
         namedEntities.push(e);
       }
     }
