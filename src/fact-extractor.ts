@@ -23,8 +23,12 @@ import { ExtractedFactSchema } from '@ardurai/contracts/zod';
 
 // ── Environment config ───────────────────────────────────────────────────────
 
-const OLLAMA_HOST = process.env['OLLAMA_HOST'] ?? 'http://localhost:11434';
-const OLLAMA_MODEL = process.env['OLLAMA_MODEL'] ?? 'llama3.1:8b';
+const OLLAMA_HOST = (() => {
+  // Ollama Cloud when API key is set; localhost otherwise
+  if (process.env['OLLAMA_API_KEY']) return 'https://ollama.com';
+  return process.env['OLLAMA_HOST'] ?? 'http://localhost:11434';
+})();
+const OLLAMA_MODEL = process.env['OLLAMA_MODEL'] ?? (process.env['OLLAMA_API_KEY'] ? 'gpt-oss:120b' : 'llama3.1:8b');
 const OLLAMA_API_KEY = process.env['OLLAMA_API_KEY'];
 const OLLAMA_TIMEOUT_MS = Number(process.env['OLLAMA_TIMEOUT_MS'] ?? '60000');
 
@@ -71,7 +75,10 @@ function factIdFrom(clusterId: string, statement: string, primaryDocId: string):
 // ── Ollama client ────────────────────────────────────────────────────────────
 
 async function ollamaGenerate(prompt: string, schema: object): Promise<string | null> {
-  const endpoint = `${OLLAMA_HOST.replace(/\/$/, '')}/api/generate`;
+  const isCloud = Boolean(OLLAMA_API_KEY);
+  const endpoint = isCloud
+    ? `${OLLAMA_HOST.replace(/\/$/, '')}/api/chat`
+    : `${OLLAMA_HOST.replace(/\/$/, '')}/api/generate`;
 
   const headers: Record<string, string> = {
     'content-type': 'application/json',
@@ -79,23 +86,33 @@ async function ollamaGenerate(prompt: string, schema: object): Promise<string | 
   if (OLLAMA_API_KEY) headers['authorization'] = `Bearer ${OLLAMA_API_KEY}`;
 
   try {
+    const body = isCloud
+      ? JSON.stringify({
+          model: OLLAMA_MODEL,
+          messages: [{ role: 'user', content: prompt }],
+          format: schema,
+          stream: false,
+          options: { temperature: 0.1, num_predict: 2048 },
+        })
+      : JSON.stringify({
+          model: OLLAMA_MODEL,
+          prompt,
+          format: schema,
+          stream: false,
+          options: { temperature: 0.1, num_predict: 2048 },
+        });
+
     const resp = await fetch(endpoint, {
       method: 'POST',
       headers,
-      body: JSON.stringify({
-        model: OLLAMA_MODEL,
-        prompt,
-        format: schema,
-        stream: false,
-        options: { temperature: 0.1, num_predict: 2048 },
-      }),
+      body,
       signal: AbortSignal.timeout(OLLAMA_TIMEOUT_MS),
     });
 
     if (!resp.ok) return null;
 
-    const data = (await resp.json()) as { response?: string };
-    return data.response ?? null;
+    const data = (await resp.json()) as { response?: string; message?: { content?: string } };
+    return data.message?.content ?? data.response ?? null;
   } catch {
     return null;
   }
@@ -302,20 +319,17 @@ function deterministicExtract(
     const allEntities = [...domainEntities, ...namedEntities];
     if (allEntities.length === 0 && numbers.length === 0) continue;
 
-    // Build a SHORT STRUCTURED statement (< 8 tokens → can never form an 8-gram with the body).
-    // This avoids the self-referential verbatim-overlap failure when the body and the statement
-    // are both derived from the same source text.
+    // Build a structured statement that is short enough to avoid verbatim overlap
+    // (< 8 tokens) but substantive enough for the provenance gate to ground claims.
+    // Include the primary entity + first 6 content words from the sentence.
     const primaryEntity = allEntities[0] ?? topic;
-    let statement: string;
-    if (numbers.length > 0) {
-      statement = `${primaryEntity}: ${numbers[0]}`;
-    } else if (allEntities.length >= 2) {
-      statement = `${allEntities[0]} and ${allEntities[1]}`;
-    } else {
-      statement = `${primaryEntity} — ${topic}`;
-    }
-    // Trim to 80 chars max; normalize whitespace
-    statement = statement.replace(/\s+/g, ' ').trim().slice(0, 80);
+    const contentWords = sentence
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter((w) => w.length >= 3 && !STOP_WORDS_DET.has(w))
+      .slice(0, 6);
+    const statement = [primaryEntity, ...contentWords].join(' ').replace(/\s+/g, ' ').trim().slice(0, 120);
 
     const stmtKey = statement.toLowerCase();
     if (seen.has(stmtKey)) continue;
@@ -358,6 +372,13 @@ function deterministicExtract(
 
   return facts;
 }
+
+const STOP_WORDS_DET = new Set([
+  'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+  'to', 'of', 'and', 'in', 'for', 'on', 'with', 'that', 'this', 'from',
+  'it', 'its', 'at', 'by', 'or', 'but', 'as', 'has', 'have', 'had',
+  'not', 'all', 'will', 'can', 'may', 'could', 'would', 'should',
+]);
 
 // ── eTLD+1 helper ─────────────────────────────────────────────────────────────
 
