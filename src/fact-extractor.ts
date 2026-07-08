@@ -20,17 +20,12 @@ import type { SourceDocument, ExtractedFact, FactProvenance } from './contracts-
 import type { ProviderMeta, Confidence } from '@ardurai/contracts';
 import { validateFactsForWire, hasForbiddenVerbatimOverlap, wordCount } from './copyright-guard.ts';
 import { ExtractedFactSchema } from '@ardurai/contracts/zod';
+import { hermesGenerateJson, hermesAvailable } from './hermes-client.ts';
 
 // ── Environment config ───────────────────────────────────────────────────────
 
-const OLLAMA_HOST = (() => {
-  // Ollama Cloud when API key is set; localhost otherwise
-  if (process.env['OLLAMA_API_KEY']) return 'https://ollama.com';
-  return process.env['OLLAMA_HOST'] ?? 'http://localhost:11434';
-})();
-const OLLAMA_MODEL = process.env['OLLAMA_MODEL'] ?? (process.env['OLLAMA_API_KEY'] ? 'gpt-oss:120b' : 'llama3.1:8b');
-const OLLAMA_API_KEY = process.env['OLLAMA_API_KEY'];
-const OLLAMA_TIMEOUT_MS = Number(process.env['OLLAMA_TIMEOUT_MS'] ?? '60000');
+const HERMES_MODEL = process.env['HERMES_MODEL'] ?? '';
+const HERMES_TIMEOUT_MS = Number(process.env['HERMES_TIMEOUT_MS'] ?? '60000');
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -72,50 +67,14 @@ function factIdFrom(clusterId: string, statement: string, primaryDocId: string):
     .slice(0, 32);
 }
 
-// ── Ollama client ────────────────────────────────────────────────────────────
+// ── Hermes LLM client ────────────────────────────────────────────────────────
 
-async function ollamaGenerate(prompt: string, schema: object): Promise<string | null> {
-  const isCloud = Boolean(OLLAMA_API_KEY);
-  const endpoint = isCloud
-    ? `${OLLAMA_HOST.replace(/\/$/, '')}/api/chat`
-    : `${OLLAMA_HOST.replace(/\/$/, '')}/api/generate`;
-
-  const headers: Record<string, string> = {
-    'content-type': 'application/json',
-  };
-  if (OLLAMA_API_KEY) headers['authorization'] = `Bearer ${OLLAMA_API_KEY}`;
-
-  try {
-    const body = isCloud
-      ? JSON.stringify({
-          model: OLLAMA_MODEL,
-          messages: [{ role: 'user', content: prompt }],
-          format: schema,
-          stream: false,
-          options: { temperature: 0.1, num_predict: 2048 },
-        })
-      : JSON.stringify({
-          model: OLLAMA_MODEL,
-          prompt,
-          format: schema,
-          stream: false,
-          options: { temperature: 0.1, num_predict: 2048 },
-        });
-
-    const resp = await fetch(endpoint, {
-      method: 'POST',
-      headers,
-      body,
-      signal: AbortSignal.timeout(OLLAMA_TIMEOUT_MS),
-    });
-
-    if (!resp.ok) return null;
-
-    const data = (await resp.json()) as { response?: string; message?: { content?: string } };
-    return data.message?.content ?? data.response ?? null;
-  } catch {
-    return null;
-  }
+async function hermesFactExtract(prompt: string): Promise<string | null> {
+  const result = hermesGenerateJson<{ facts?: RawFactFromLlm[] }>(prompt, {
+    timeoutMs: HERMES_TIMEOUT_MS,
+    ...(HERMES_MODEL ? { model: HERMES_MODEL } : {}),
+  });
+  return result ? JSON.stringify(result) : null;
 }
 
 // ── LLM extraction ───────────────────────────────────────────────────────────
@@ -185,7 +144,7 @@ async function extractWithLlm(
   for (const { doc, body } of pairs) {
     if (!body || body.length < 100) continue;
     const prompt = buildExtractionPrompt(body, doc.title, topic);
-    const raw = await ollamaGenerate(prompt, EXTRACTION_SCHEMA);
+    const raw = await hermesFactExtract(prompt);
     if (!raw) continue;
 
     try {
@@ -200,8 +159,8 @@ async function extractWithLlm(
   if (perSourceFacts.size === 0) return null;
 
   const providerMeta: ProviderMeta = {
-    provider: 'ollama',
-    model: OLLAMA_MODEL,
+    provider: 'hermes',
+    model: HERMES_MODEL || 'session-default',
     status: 'generated',
     generatedAt,
   };
@@ -552,7 +511,7 @@ export async function extractFacts(
         provider: 'deterministic',
         model: 'regex-v1',
         status: 'fallback',
-        reason: llmResult === null ? 'ollama-unavailable' : 'llm-returned-empty',
+        reason: llmResult === null ? 'hermes-unavailable' : 'hermes-returned-empty',
         generatedAt: now.toISOString(),
       },
       warnings,
