@@ -2,32 +2,36 @@
  * Hermes LLM client — shared by fact-extractor and article-synthesizer.
  *
  * When Hermes Agent is available (local cron), delegates AI calls to
- * `hermes chat --quiet` via stdin. When unavailable (CI), returns null
+ * `hermes chat -q` via a temp file. When unavailable (CI), returns null
  * so callers fall back to deterministic extraction.
  *
  * Detection: `HERMES_AVAILABLE=0` or `CI=true` → skip.
- * Otherwise checks for `hermes` on PATH.
+ * Otherwise checks for `hermes` on PATH (lazy, not at import time).
  */
 
 import { execSync } from 'node:child_process';
+import { writeFileSync, unlinkSync, existsSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 
 const FORCE_SKIP =
   process.env['HERMES_AVAILABLE'] === '0' || process.env['CI'] === 'true';
 
-function hermesOnPath(): boolean {
-  if (FORCE_SKIP) return false;
-  try {
-    execSync('which hermes', { timeout: 3000, stdio: 'ignore' });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const AVAILABLE: boolean = hermesOnPath();
+let _checked = false;
+let _available = false;
 
 export function hermesAvailable(): boolean {
-  return AVAILABLE;
+  if (FORCE_SKIP) return false;
+  if (_checked) return _available;
+  _checked = true;
+  try {
+    execSync('which hermes', { timeout: 3000, stdio: 'ignore' });
+    _available = true;
+  } catch {
+    _available = false;
+  }
+  return _available;
 }
 
 /**
@@ -38,19 +42,23 @@ export function hermesGenerate(
   prompt: string,
   opts: { timeoutMs?: number; model?: string | undefined } = {},
 ): string | null {
-  if (!AVAILABLE) return null;
+  if (!hermesAvailable()) return null;
 
   const timeoutMs = opts.timeoutMs ?? 60_000;
   const modelArg = opts.model ? `-m "${opts.model}"` : '';
+  const tmpFile = join(tmpdir(), `hermes-prompt-${randomUUID()}.txt`);
 
   try {
+    writeFileSync(tmpFile, prompt, 'utf8');
     const result = execSync(
-      `hermes chat --quiet ${modelArg} <<'HERMES_EOF'\n${prompt}\nHERMES_EOF`,
+      `hermes chat -q "$(cat '${tmpFile}')" ${modelArg} --quiet`,
       { timeout: timeoutMs, encoding: 'utf8', maxBuffer: 100 * 1024, shell: '/bin/bash' },
     );
     return result.trim() || null;
   } catch {
     return null;
+  } finally {
+    try { if (existsSync(tmpFile)) unlinkSync(tmpFile); } catch {}
   }
 }
 
